@@ -13,8 +13,6 @@ type Subscription<T> = {
 
 export class BaseReconciler {
 
-  private static OPTIMIZATION_ITERATIONS = Math.pow(2, 5);
-
   baseDb: Database<BaseData>;
   cellDb: Database<CellData>;
   linkDb: Database<LinkData>;
@@ -54,14 +52,15 @@ export class BaseReconciler {
 
   }
 
-  optimize(baseId: BaseId): { baseDbData: BaseData[], cellDbData: CellData[] } {
+  optimize(baseId: BaseId, { iterations } = { iterations: Math.pow(2, 6) }): { baseDbData: BaseData[], cellDbData: CellData[] } {
+
     const base = this.baseDb.get(baseId);
     const cells = base.status.cells.map((baseStatusCellRow) => baseStatusCellRow.map((baseStatusCell) => this.cellDb.get(baseStatusCell.id)));
 
     let nextBase = cloneBase(base);
     let nextCells = cells.map((cellRow) => cellRow.map((cell) => cloneCell(cell)));
 
-    for (let iteration = 0; iteration < BaseReconciler.OPTIMIZATION_ITERATIONS; iteration += 1) {
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
 
       const candidateBase = cloneBase(nextBase);
       const candidateCells = nextCells.map((cellRow) => cellRow.map((cell) => cloneCell(cell)));
@@ -123,15 +122,15 @@ export class BaseReconciler {
 
       candidateBase.status.energy = this.computeEnergy(candidateBase, { cellDb });
 
-      // Quadratic
-      const energyIncreaseFractionAllowed = 1 + Math.pow(BaseReconciler.OPTIMIZATION_ITERATIONS - iteration, 2) / Math.pow(BaseReconciler.OPTIMIZATION_ITERATIONS, 2);
-      const energyIncreaseFraction = candidateBase.status.energy / nextBase.status.energy;
+      // Parabolic
+      const threshold = nextBase.status.energy * (1 + Math.pow((iterations - iteration) / iterations, Math.E));
 
-      if (energyIncreaseFraction < energyIncreaseFractionAllowed) {
+      if (candidateBase.status.energy < threshold) {
         nextBase = candidateBase;
         nextCells = candidateCells;
       }
     }
+
     nextBase = nextBase.status.energy < base.status.energy ? nextBase : base;
     nextCells = nextBase.status.energy < base.status.energy ? nextCells : cells;
     nextBase.status.state = BaseState.READY;
