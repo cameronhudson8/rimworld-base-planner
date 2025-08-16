@@ -1,21 +1,31 @@
-import { Dispatch, ReactElement, SetStateAction, useEffect, useState } from "react";
+import { Dispatch, ReactElement, SetStateAction, useEffect, useState, useRef } from "react";
 import { MessageType } from "../base/base-view";
-import { RoomData } from "../../models/room";
+import {
+  RoomData,
+  RoomId,
+} from "../../models/room";
 
 export interface CellViewProps {
-  color?: string,
+  roomsAllowed: { id: RoomId }[];
   room?: RoomData;
-  roomIsLocked: boolean;
-  roomOptions: RoomData[],
-  scaleFactor: number,
-  setMessage: Dispatch<SetStateAction<{ text: string; type: MessageType; }>>,
-  setRoom: (newRoomName: string) => void,
-  setUsable: (usable: boolean) => void,
-  unsetRoom: () => void,
-  usable: boolean,
+  roomOptions: RoomData[];
+  scaleFactor: number;
+  setRoomsAllowed: (roomsAllowed: { id: RoomId }[]) => void;
+  setMessage: Dispatch<SetStateAction<{ text: string; type: MessageType; }>>;
 }
 
-export function CellView({ color, room, roomIsLocked, roomOptions, scaleFactor, setMessage, setRoom, setUsable, usable, unsetRoom }: CellViewProps): ReactElement {
+export function CellView({
+  roomsAllowed: cellRoomsAllowed,
+  room,
+  roomOptions,
+  scaleFactor,
+  setRoomsAllowed,
+  setMessage,
+}: CellViewProps): ReactElement {
+
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const cellRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   function getWindowDimensions() {
     const { innerWidth: width, innerHeight: height } = window;
@@ -25,6 +35,7 @@ export function CellView({ color, room, roomIsLocked, roomOptions, scaleFactor, 
   }
 
   const [windowDimensions, setWindowDimensions] = useState(getWindowDimensions());
+
   useEffect(() => {
     function handleResize() {
       setWindowDimensions(getWindowDimensions());
@@ -33,84 +44,158 @@ export function CellView({ color, room, roomIsLocked, roomOptions, scaleFactor, 
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Close dropdown when clicking outside
+  useEffect(
+    () => {
+      function handleClickOutside(event: MouseEvent) {
+        if (
+          cellRef.current
+          && !cellRef.current.contains(event.target as Node)
+          && dropdownRef.current
+          && !dropdownRef.current.contains(event.target as Node)
+        ) {
+          setIsDropdownOpen(false);
+        }
+      }
 
-  const [isHovered, setIsHovered] = useState(false);
-
-  const AUTO_ROOM_SETTING = {
-    id: '<auto>',
-    spec: {
-      name: roomIsLocked ? '<auto>' : room?.spec.name,
+      if (isDropdownOpen) {
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+      }
     },
-  };
-
-  // This list must also include the currently linked room,
-  // or it won't display as the dropdown's current value.
-  const roomOptionsWithAuto = [
-    AUTO_ROOM_SETTING,
-    ...roomOptions
-      .sort((a, b) => a.spec.name > b.spec.name ? 1 : -1)
-      .map((roomOption) => ({
-        ...roomOption,
-        spec: {
-          ...roomOption.spec,
-          name: `🔒 ${roomOption.spec.name}`,
-        }
-      })),
-  ];
-
-  return (
-    <button
-      className={`cell ${usable ? '' : "cell-unusable"}`}
-      onClick={() => setUsable(!usable)}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      style={{
-        ...(color ? { backgroundColor: color } : {}),
-        ...(isHovered ? { opacity: "50%" } : {}),
-        height: `${100 * scaleFactor}%`,
-        textOverflow: 'ellipsis',
-        width: `${100 * scaleFactor}%`,
-      }}
-    >
-      <select
-        // disabled={isOptimizing}
-        // id={`room-${roomIndex}-link-${linkIndex}`}
-        onClick={(event) => event.stopPropagation()}
-        onMouseEnter={() => setIsHovered(false)}
-        onChange={(event) => {
-          const newRoomId = event.target.value;
-          try {
-            if (newRoomId === AUTO_ROOM_SETTING.id) {
-              unsetRoom();
-              return;
-            }
-            setRoom(newRoomId);
-          } catch (err) {
-            console.error(err);
-            setMessage({
-              type: MessageType.ERROR,
-              text: String(err),
-            });
-          }
-        }}
-        style={{
-          fontSize: `${1 * windowDimensions.width / 256 * scaleFactor}rem`,
-        }}
-        value={roomIsLocked ? room?.id : AUTO_ROOM_SETTING.id}
-      >
-        {
-          roomOptionsWithAuto
-            .map((roomOption, roomIndex) => (
-              <option
-                value={roomOption.id}
-                key={roomIndex}
-              >
-                {roomOption.spec.name}
-              </option>
-            ))
-        }
-      </select>
-    </button >
+    [isDropdownOpen],
   );
 
+  const dropdownText = `${cellRoomsAllowed.length} room${cellRoomsAllowed.length !== 1 ? 's' : ''} allowed`;
+
+  return (
+    <div
+      className={`cell ${cellRoomsAllowed.length > 0 ? '' : "cell-disabled"}`}
+      style={{
+        ...(room ? { backgroundColor: room.color } : {}),
+        height: `${100 * scaleFactor}%`,
+        width: `${100 * scaleFactor}%`,
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'center',
+        alignItems: 'center',
+      }}
+    >
+      <div
+        className="cell-content"
+        onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+        ref={cellRef}
+        style={{
+          cursor: 'pointer',
+          padding: '4px',
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          textAlign: 'center',
+        }}
+      >
+        {/* Room name (if assigned) */}
+        {room && (
+          <div
+            style={{
+              fontSize: `${1 * windowDimensions.width / 256 * scaleFactor}rem`,
+              marginBottom: '4px',
+              lineHeight: 1.2,
+            }}
+          >
+            {room.name}
+          </div>
+        )}
+
+        {/* Dropdown indicator */}
+        <div
+          style={{
+            fontSize: `${0.8 * windowDimensions.width / 256 * scaleFactor}rem`,
+            display: 'flex',
+            alignItems: 'center',
+            lineHeight: 1.2,
+          }}
+        >
+          {dropdownText}
+          <span style={{ marginLeft: '4px', fontSize: '0.8em' }}>
+            {isDropdownOpen ? '▲' : '▼'}
+          </span>
+        </div>
+      </div>
+
+      {/* Dropdown menu */}
+      {isDropdownOpen && (
+        <div
+          className="dropdown-menu"
+          ref={dropdownRef}
+          style={{
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            right: 0,
+            zIndex: 1000,
+            backgroundColor: 'white',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            padding: '4px',
+            maxHeight: `${Math.min(roomOptions.length * 30, 200)}px`,
+            overflowY: 'auto',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+            fontSize: `${0.8 * windowDimensions.width / 256 * scaleFactor}rem`,
+          }}
+        >
+          {roomOptions.map((roomOption, roomIndex) => (
+            <label
+              key={roomIndex}
+              style={{
+                display: 'block',
+                padding: '2px 4px',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <input
+                type="checkbox"
+                value={roomOption.id}
+                checked={cellRoomsAllowed.some((room) => room.id === roomOption.id)}
+                onChange={(event) => {
+                  const isChecked = event.target.checked;
+                  let updatedRoomsAllowed = [...cellRoomsAllowed];
+
+                  if (isChecked) {
+                    // Add room if not already selected
+                    if (!cellRoomsAllowed.some((room) => room.id === roomOption.id)) {
+                      updatedRoomsAllowed.push({
+                        id: roomOption.id,
+                      });
+                    }
+                  } else {
+                    // Remove room
+                    updatedRoomsAllowed = updatedRoomsAllowed
+                      .filter((room) => room.id !== roomOption.id);
+                  }
+
+                  try {
+                    setRoomsAllowed(updatedRoomsAllowed);
+                  } catch (err) {
+                    console.error(err);
+                    setMessage({
+                      type: MessageType.ERROR,
+                      text: String(err),
+                    });
+                  }
+                }}
+                style={{ marginRight: '6px' }}
+              />
+              {roomOption.name}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

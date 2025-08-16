@@ -20,7 +20,6 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
       <div className="labeled-element" >
         <label htmlFor={`room-${roomIndex}-name`}>Room Name</label>
         <input
-          // disabled={isOptimizing}
           id={`room-${roomIndex}-name`}
           onChange={(event) => {
             const newRoomName = event.target.value;
@@ -35,7 +34,7 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
             }
           }}
           type="text"
-          value={room.spec.name}
+          value={room.name}
         />
       </div>
       <div
@@ -43,7 +42,6 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
       >
         <label htmlFor={`room-${roomIndex}-size`}>Size</label>
         <input
-          // disabled={isOptimizing}
           id={`room-${roomIndex}-size`}
           min={0}
           onChange={(event) => {
@@ -66,7 +64,7 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
             }
           }}
           type="number"
-          value={room.spec.size}
+          value={room.size}
         />
       </div>
       <div
@@ -74,7 +72,6 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
       >
         <label htmlFor={`room-${roomIndex}-color`}>Color</label>
         <input
-          // disabled={isOptimizing}
           id={`room-${roomIndex}-color`}
           onChange={(event) => {
             const newRoomColor = event.target.value;
@@ -89,7 +86,7 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
             }
           }}
           type="color"
-          value={room.spec.color}
+          value={room.color}
         />
       </div>
       <div
