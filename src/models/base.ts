@@ -303,14 +303,13 @@ export class Base implements BaseData {
         })))
         .flat();
       const usableCells = cellsWithCoordinates.filter(({ cell }) => cell.roomsAllowed.length > 0);
-      const singlePurposeCells = usableCells.filter(({ cell }) => cell.roomsAllowed.length === 1);
       const swappableCells = usableCells
         .filter(({ cell }) => {
           if (cell.roomsAllowed.length > 1) {
             return true;
           }
           const allowedRoomId = cell.roomsAllowed[0].id;
-          const numberOftherCellsThatAllowThisRoom = singlePurposeCells
+          const numberOftherCellsThatAllowThisRoom = usableCells
             .filter(({ cell: c }) => c !== cell && c.roomsAllowed[0].id !== allowedRoomId)
             .length;
           if (numberOftherCellsThatAllowThisRoom === 0) {
