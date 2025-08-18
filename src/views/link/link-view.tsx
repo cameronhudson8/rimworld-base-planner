@@ -9,11 +9,11 @@ export interface LinkViewProps {
   linkIndex: number,
   // Needed?
   roomIndex: number,
-  setLinkedRoomName: (newLinkedRoomName: string) => void;
+  setLinkedRoomId: (newLinkedRoomId: string) => void;
   setMessage: Dispatch<SetStateAction<{ text: string; type: MessageType; }>>,
 }
 
-export function LinkView({ deleteLink, linkableRooms, linkedRoom, linkIndex, roomIndex, setLinkedRoomName, setMessage }: LinkViewProps): ReactElement {
+export function LinkView({ deleteLink, linkableRooms, linkedRoom, linkIndex, roomIndex, setLinkedRoomId, setMessage }: LinkViewProps): ReactElement {
   return (
     <div
       className="flexbox-row"
@@ -24,12 +24,11 @@ export function LinkView({ deleteLink, linkableRooms, linkedRoom, linkIndex, roo
       >
         <label htmlFor={`room-${roomIndex}-link-${linkIndex}`}>Other Room Name</label>
         <select
-          // disabled={isOptimizing}
           id={`room-${roomIndex}-link-${linkIndex}`}
           onChange={(event) => {
-            const newLinkedRoomName = event.target.value;
+            const newLinkedRoomId = event.target.value;
             try {
-              setLinkedRoomName(newLinkedRoomName);
+              setLinkedRoomId(newLinkedRoomId);
             } catch (err) {
               console.error(err);
               setMessage({
@@ -38,7 +37,7 @@ export function LinkView({ deleteLink, linkableRooms, linkedRoom, linkIndex, roo
               });
             }
           }}
-          value={linkedRoom.spec.name}
+          value={linkedRoom.id}
         >
           {
             // This list must also include the currently linked room,
@@ -47,14 +46,13 @@ export function LinkView({ deleteLink, linkableRooms, linkedRoom, linkIndex, roo
               linkedRoom,
               ...linkableRooms,
             ]
-              .map((room) => room.spec.name)
-              .sort((a, b) => a > b ? 1 : -1)
-              .map((linkableRoomName, linkableRoomIndex) => (
+              .sort((room1, room2) => room1.name > room2.name ? 1 : -1)
+              .map((linkableRoom, linkableRoomIndex) => (
                 <option
-                  value={linkableRoomName}
+                  value={linkableRoom.id}
                   key={`room-${roomIndex}-link-${linkIndex}-linkable-room-${linkableRoomIndex}`}
                 >
-                  {linkableRoomName}
+                  {linkableRoom.name}
                 </option>
               ))
           }

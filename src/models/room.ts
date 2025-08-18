@@ -3,112 +3,84 @@ import joi from "joi";
 import { padWithZeros } from "../utils";
 
 export type RoomId = string;
+
 export type RoomName = string;
 
-
-export enum RoomOwnerType {
-  BASE = 'BASE',
-};
-
-export interface RoomMetadata {
-  owner?: {
-    type: RoomOwnerType,
-    id: string,
-  },
-}
-
-export interface RoomSpec {
+export interface RoomData {
   color: string;
+  id: RoomId;
   name: RoomName;
   size: number;
 };
 
-export type RoomStatus = object;
+export class Room implements RoomData {
 
-export interface RoomData {
-  id: RoomId,
-  metadata: RoomMetadata,
-  spec: RoomSpec,
-  status: RoomStatus
+  color: string;
+  id: RoomId;
+  name: RoomName;
+  size: number;
+
+  constructor();
+  constructor(
+    {
+      color,
+      id,
+      name,
+      size,
+    }:
+      {
+        color?: string,
+        id?: RoomId,
+        name?: RoomName,
+        size?: number,
+      });
+  constructor(
+    {
+      color,
+      id,
+      name,
+      size,
+    }:
+      {
+        color?: string,
+        id?: RoomId,
+        name?: RoomName,
+        size?: number,
+      } = {}) {
+    this.color = color ?? randomColor();
+    this.id = id ?? crypto.randomUUID()
+    this.name = name ?? "";
+    this.size = size ?? 0;
+  }
 };
-
-export const metadataSchema = joi.object<RoomMetadata, true>({
-  owner: joi.object<{ type: RoomOwnerType, id: string }, true>({
-    type: joi.string().allow(...Object.values(RoomOwnerType)),
-    id: joi.string(),
-  }).optional(),
-});
-
-export const specSchema = joi.object<RoomSpec, true>({
-  color: joi.string().regex(/#[a-f0-9]{6}/i),
-  name: joi.string().min(0),
-  size: joi.number().min(0),
-});
-
-export const statusSchema = joi.object<RoomStatus, true>({});
 
 export const dataSchema = joi.object<RoomData, true>({
-  id: joi.string(),
-  metadata: metadataSchema,
-  spec: specSchema,
-  status: statusSchema.optional(),
+  color: joi.string().regex(/#[a-f0-9]{6}/i),
+  id: joi.string().min(0),
+  name: joi.string().min(0),
+  size: joi.number(),
 });
-
-export const schema = joi.object<Room, true>({
-  id: joi.string(),
-  metadata: metadataSchema,
-  spec: specSchema,
-  status: statusSchema.optional(),
-});
-
-export interface Room {
-  readonly id: RoomId;
-  readonly metadata: RoomMetadata;
-  readonly spec: RoomSpec;
-  readonly status: RoomStatus;
-};
 
 // This returns a deep clone of an existing class instance. No object references are preserved.
-export function clone(room: Room): Room {
-  const clone: Room = {
+export function clone(room: RoomData): RoomData {
+  const clone: RoomData = {
+    color: room.color,
     id: room.id,
-    metadata: {
-      ...(room.metadata.owner ? {
-        owner: {
-          type: room.metadata.owner.type,
-          id: room.metadata.owner.id,
-        }
-      } : {}),
-    },
-    spec: {
-      color: room.spec.color,
-      name: room.spec.name,
-      size: room.spec.size,
-    },
-    status: {},
+    name: room.name,
+    size: room.size,
   };
   return clone;
 };
 
 // This accepts an unknown variable, performs validation, and returns a class instance.
 // It does not preserve references to any objects or sub-objects that are passed in.
-export function validate(existingRoom: unknown): Room {
-  const { error, value } = schema.validate(existingRoom);
+export function validate(existingRoom: unknown): RoomData {
+  const { error, value } = dataSchema.validate(existingRoom);
   if (error !== undefined) {
     throw error;
   }
   return value;
 };
-
-// This accepts an unknown variable, performs validation, and returns a spec.
-// It does not preserve references to any objects or sub-objects that are passed in.
-export function validateSpec(existingRoomSpec: unknown): RoomSpec {
-  const { error, value } = specSchema.validate(existingRoomSpec);
-  if (error !== undefined) {
-    throw error;
-  }
-  return value;
-}
 
 export function randomColor(): string {
   const colorsHex = Array.from(crypto.getRandomValues(new Uint8Array(3)))

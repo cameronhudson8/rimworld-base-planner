@@ -1,24 +1,15 @@
 import { ReactElement, useState } from "react";
-import joi from "joi";
 
-import { Base } from '../../models';
 import { CellView } from '../cell';
-import { Database, defaultData } from "../../storage/database";
-import { LocalStorage } from "../../storage/local-storage";
-import { randomColor, RoomData, RoomOwnerType, schema as roomSchema } from "../../models/room";
-import { BaseData, schema as baseSchema } from "../../models/base";
-import { BaseReconciler } from "../../reconcilers/base-reconciler";
-import { LinkData, schema as linkSchema } from "../../models/link";
-import { CellData, CellOwnerType, schema as cellSchema } from "../../models/cell";
+import {
+  Base,
+  BaseData,
+  baseDataSchema,
+  Room,
+} from "../../models";
 import { RoomView } from "../room";
 import { LinkView } from "../link/link-view";
-
-export type StateData = {
-  baseDbData: BaseData[],
-  cellDbData: CellData[],
-  linkDbData: LinkData[],
-  roomDbData: RoomData[],
-};
+import { RoomId } from "../../models/room";
 
 export enum MessageType {
   ERROR = "ERROR",
@@ -34,49 +25,36 @@ export function BaseView(): ReactElement {
   // 5. Save all changes to the "database" (and then to local storage).
   // 6. Call setState with the updated state.
 
-  const LOCAL_STORAGE_KEY = 'rimworld-base-planner';
-  const schema = joi.object<StateData, true>({
-    baseDbData: joi.array<BaseData[]>().items(baseSchema).min(1),
-    cellDbData: joi.array<CellData[]>().items(cellSchema),
-    linkDbData: joi.array<LinkData[]>().items(linkSchema),
-    roomDbData: joi.array<RoomData[]>().items(roomSchema),
-  });
-  const localStorage = new LocalStorage(LOCAL_STORAGE_KEY, schema);
-  const initialData = localStorage.read(defaultData);
+  const LOCAL_STORAGE_KEY = "base";
+  const existingBaseData = (() => {
+    const localStorageString = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (localStorageString === null) {
+      return undefined;
+    }
+    const localStorageObject = (() => {
+      try {
+        return JSON.parse(localStorageString)
+      } catch (err) {
+        console.warn(`The localStorage data for key '${LOCAL_STORAGE_KEY}' was not parseable as JSON: '${JSON.stringify(err)}'`);
+        localStorage.removeItem(LOCAL_STORAGE_KEY);
+        return undefined;
+      }
+    })();
+    const { error, value } = baseDataSchema.validate(localStorageObject);
+    if (error !== undefined) {
+      console.warn(`The localStorage data for key '${LOCAL_STORAGE_KEY}' failed validation as BaseData: '${JSON.stringify(error)}'`);
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+      return undefined;
+    }
+    return value;
+  })();
 
-  const [state, _setState] = useState(initialData);
-  const setState = (newValue: StateData) => {
-    localStorage.write(newValue);
-    return _setState(newValue);
+  const [baseData, _setBaseData] = useState(existingBaseData ?? _createDefaultBase());
+  const setBaseData = (newValue: BaseData) => {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(newValue));
+    return _setBaseData(newValue);
   };
-
-  const baseDb = new Database<BaseData>(initialData.baseDbData);
-  const cellDb = new Database<CellData>(initialData.cellDbData);
-  const linkDb = new Database<LinkData>(initialData.linkDbData);
-  const roomDb = new Database<RoomData>(initialData.roomDbData);
-
-  // The BaseReconciler subscribes to change events from the baseDb and performs reconciliation automatically.
-  const dbData = {
-    baseDb,
-    cellDb,
-    linkDb,
-    roomDb,
-  };
-  const baseReconciler = new BaseReconciler(dbData, (newState) => {
-    return setState({
-      ...state,
-      ...newState,
-    });
-  });
-
-  const baseRecords = baseDb.list();
-  const mostRecentBase = baseRecords.pop();
-  if (mostRecentBase === undefined) {
-    throw new Error(`Somehow local storage had been saved without any base records!`)
-  }
-  const base = new Base(mostRecentBase);
-
-  // const [isOptimizing, setIsOptimizing] = useState(false);
+  const base = new Base(baseData);
 
   const [message, setMessage] = useState<{
     text: string,
@@ -91,55 +69,33 @@ export function BaseView(): ReactElement {
       <div className="cell-grid">
         <h2>Base</h2>
         {
-          base.status.cells.map((baseStatusCellRow, i) => (
+          base.cells.map((cellRow, i) => (
             <div
               className="cell-row"
               key={String(i)}
             >
               {
-                baseStatusCellRow.map((baseStatusCell, j) => {
-                  // The cellSpec of the Base (base.spec.cells[][]) will contain roomIds
+                cellRow.map((cell, j) => {
+                  // The cellSpec of the Base (base.cells[][]) will contain roomIds
                   // if cells have been explicitly assigned to rooms by the user,
                   // but not for those cells that have been auto-assigned to rooms.
                   // We can get the final room assignments (explicit + automatic) from base.cells[][].spec.
-                  const cell = cellDb.get(baseStatusCell.id);
-                  const roomId = cell.status.roomId;
-                  const room = roomId === undefined ? undefined : roomDb.get(roomId);
-                  const roomOptions = roomDb.list([(room) => room.metadata.owner?.type === RoomOwnerType.BASE && room.metadata.owner?.id === base.id]);
+                  const roomId = cell.roomId;
+                  const room = base.rooms.find((room) => room.id === roomId);
+                  const roomOptions = base.rooms;
 
                   return (
                     <CellView
-                      color={room?.spec.color}
-                      key={j}
                       room={room}
-                      roomIsLocked={base.spec.cells[i][j].roomName !== undefined}
+                      key={j}
                       roomOptions={roomOptions}
-                      scaleFactor={base.spec.cells.length <= 0 ? 1 : 1 / base.spec.cells.length}
+                      roomsAllowed={base.cells[i][j].roomsAllowed}
+                      scaleFactor={base.cells.length <= 0 ? 1 : 1 / base.cells.length}
                       setMessage={setMessage}
-                      setRoom={(newRoomId: string) => {
-                        const room = roomDb.get(newRoomId);
-                        base.spec.cells[i][j].usable = true;
-                        base.spec.cells[i][j].roomName = room.spec.name;
-                        baseDb.put(base);
-                      }}
-                      setUsable={(usable: boolean) => {
-                        // If it was previously unusable, then it will still have no roomId.
-                        // If it was previous usable, then it will now have no roomId.
-                        try {
-                          base.setCellUsability([i, j], usable);
-                          baseDb.put(base);
-                        } catch (err) {
-                          console.error(err);
-                          setMessage({
-                            type: MessageType.ERROR,
-                            text: String(err),
-                          });
-                        }
-                      }}
-                      usable={cell.spec.usable}
-                      unsetRoom={() => {
-                        delete base.spec.cells[i][j].roomName;
-                        baseDb.put(base);
+                      setRoomsAllowed={(roomsAllowed: { id: RoomId }[]) => {
+                        const roomsAllowedValidated: { id: RoomId }[] = roomsAllowed.map((room) => ({ id: room.id }));
+                        base.cells[i][j].roomsAllowed = roomsAllowedValidated;
+                        setBaseData(base);
                       }}
                     />
                   );
@@ -153,7 +109,7 @@ export function BaseView(): ReactElement {
         (() => {
           const errors: string[] = [
             ...(message.type === 'ERROR' ? [message.text] : []),
-            ...base.status.errors
+            ...base.errors
               .map((errorWithCode) => Object.values(errorWithCode))
               .flat(),
           ];
@@ -171,21 +127,15 @@ export function BaseView(): ReactElement {
         })()
       }
 
-      {/* <p>{isOptimizing}</p> */}
       <button
-        // disabled={isOptimizing}
         onClick={() => {
           try {
             setMessage({
               type: MessageType.INFO,
               text: "Optimizing...",
             });
-            const { baseDbData, cellDbData } = baseReconciler.optimize(base.id);
-            setState({
-              ...state,
-              baseDbData,
-              cellDbData,
-            });
+            base.optimize();
+            setBaseData(base);
           } catch (err) {
             console.error(err);
             setMessage({
@@ -203,14 +153,13 @@ export function BaseView(): ReactElement {
         Optimize
       </button>
       <button
-        // disabled={isOptimizing}
         onClick={() => {
           const agreed = window.confirm("WARNING: This will permanently delete the existing Base. Continue?");
           if (agreed !== true) {
             return;
           }
           try {
-            setState(defaultData);
+            setBaseData(_createDefaultBase());
           } catch (err) {
             console.error(err);
             setMessage({
@@ -222,11 +171,8 @@ export function BaseView(): ReactElement {
       >
         Reset
       </button>
-      {/* {
-        isOptimizing && <div className="spinner"></div>
-      } */}
       <p>Current energy: {
-        base.status.energy.toLocaleString(
+        base.energy.toLocaleString(
           undefined,
           {
             minimumSignificantDigits: 4,
@@ -241,7 +187,6 @@ export function BaseView(): ReactElement {
         >
           <label htmlFor="size">Size</label>
           <input
-            // disabled={isOptimizing}
             id="size"
             min={0}
             onChange={(event) => {
@@ -250,28 +195,8 @@ export function BaseView(): ReactElement {
                 return;
               }
               try {
-                base.setSize(
-                  newBaseSize,
-                  () => ({ usable: false }),
-                  () => {
-                    const newCell = cellDb.create({
-                      metadata: {
-                        owner: {
-                          type: CellOwnerType.BASE,
-                          id: base.id,
-                        },
-                      },
-                      spec: {
-                        usable: false,
-                      },
-                      status: {},
-                    });
-                    return {
-                      id: newCell.id,
-                    };
-                  },
-                );
-                baseDb.put(base);
+                base.setSize(newBaseSize);
+                setBaseData(base);
               } catch (err) {
                 console.error(err);
                 setMessage({
@@ -280,35 +205,23 @@ export function BaseView(): ReactElement {
                 });
               }
             }}
+            onWheel={(event) => {
+              event.preventDefault();
+            }}
             type="number"
-            value={base.status.cells.length}
+            value={base.cells.length}
           />
         </div>
       </div>
       <h2>Room Configuration</h2>
       <div>
         {
-          base.status.rooms
-            .map((roomStatus) => roomDb.get(roomStatus.id))
+          base.rooms
             .map((room, r) => (
               <RoomView
                 deleteRoom={() => {
-                  // Delete affected links.
-                  base.status.links
-                    .map((baseStatusLink) => linkDb.get(baseStatusLink.id))
-                    .filter((link) => link.status.roomIds[0] === room.id || link.status.roomIds[1] === room.id)
-                    .forEach((link) => base.deleteLink(link.id));
-                  // Update affected cells.
-                  base.status.cells
-                    .map((baseStatusCellRow) => baseStatusCellRow.map((baseStatusCell) => cellDb.get(baseStatusCell.id)))
-                    .forEach((cellRow, i) => cellRow.forEach((cell, j) => {
-                      if (cell.status.roomId === room.id) {
-                        delete base.spec.cells[i][j].roomName;
-                      }
-                    }));
-                  // Delete the room.
                   base.deleteRoom(r);
-                  baseDb.put(base);
+                  setBaseData(base);
                 }}
                 key={r}
                 room={room}
@@ -316,44 +229,33 @@ export function BaseView(): ReactElement {
                 setMessage={setMessage}
                 setRoomColor={(newRoomColor: string) => {
                   base.setRoomColor(r, newRoomColor);
-                  baseDb.put(base);
+                  setBaseData(base);
                 }}
                 setRoomName={(newRoomName: string) => {
                   base.setRoomName(r, newRoomName);
-                  // Update the affected links.
-                  const affectedLinks = base.status.links
-                    .map((baseStatusLink) => linkDb.get(baseStatusLink.id))
-                    .filter((link) => link.status.roomIds[0] === room.id || link.status.roomIds[1] === room.id);
-                  for (const affectedLink of affectedLinks) {
-                    const baseLinkIndex = base.status.links.findIndex((link) => link.id === affectedLink.id);
-                    const room0IsAffected = affectedLink.status.roomIds[0] === room.id;
-                    const room1IsAffected = affectedLink.status.roomIds[1] === room.id;
-                    base.spec.links[baseLinkIndex].roomNames = {
-                      0: room0IsAffected ? newRoomName : base.spec.links[baseLinkIndex].roomNames[0],
-                      1: room1IsAffected ? newRoomName : base.spec.links[baseLinkIndex].roomNames[1],
-                    };
-                  }
-                  baseDb.put(base);
+                  setBaseData(base);
                 }}
                 setRoomSize={(newRoomSize: number) => {
                   base.setRoomSize(r, newRoomSize);
-                  baseDb.put(base);
+                  setBaseData(base);
                 }}
               >
                 {
                   (() => {
-                    const currentLinks = base.status.links
-                      .map((baseStatusLink) => baseStatusLink.id)
-                      .map((linkId) => linkDb.get(linkId))
-                      .filter((link) => link.status.roomIds[0] === room.id || link.status.roomIds[1] === room.id)
+                    const currentLinks = base.links
+                      .filter((link) => link.roomIds[0] === room.id || link.roomIds[1] === room.id)
                     const currentlyLinkedRooms = currentLinks
-                      .map((link) => link.status.roomIds[0] === room.id ? link.status.roomIds[1] : link.status.roomIds[0])
-                      .map((otherRoomId) => roomDb.get(otherRoomId));
-                    const linkableRooms = base.status.rooms
-                      .map((baseStatusRoom) => baseStatusRoom.id)
-                      .filter((roomId) => !currentlyLinkedRooms.map((room) => room.id).includes(roomId))
-                      .filter((unlinkedRoomId) => unlinkedRoomId !== room.id)
-                      .map((unlinkedRoomId) => roomDb.get(unlinkedRoomId));
+                      .map((link) => link.roomIds[0] === room.id ? link.roomIds[1] : link.roomIds[0])
+                      .map((otherRoomId) => {
+                        const otherRoom = base.rooms.find((otherRoom) => otherRoom.id === otherRoomId);
+                        if (otherRoom === undefined) {
+                          throw new Error(`Room '${room.name}' has a link to a room with ID '${otherRoomId}', but there is no such room.`)
+                        }
+                        return otherRoom;
+                      });
+                    const linkableRooms = base.rooms
+                      .filter((otherRoom) => otherRoom.id !== room.id)
+                      .filter((otherRoom) => !currentlyLinkedRooms.some((currentlyLinkedRoom) => currentlyLinkedRoom.id === otherRoom.id))
                     return (
                       <div
                         id={`room-${r}-links`}
@@ -364,28 +266,31 @@ export function BaseView(): ReactElement {
                       >
                         {
                           currentLinks.map((link, linkIndex) => {
-                            const linkedRoomId = link.status.roomIds[0] === room.id ? link.status.roomIds[1] : link.status.roomIds[0];
-                            const linkedRoom = roomDb.get(linkedRoomId);
+                            const linkedRoomId = link.roomIds[0] === room.id ? link.roomIds[1] : link.roomIds[0];
+                            const linkedRoom = base.rooms.find((otherRoom) => otherRoom.id === linkedRoomId);
+                            if (linkedRoom === undefined) {
+                              throw new Error(`Room '${room.name}' has a link to a room with ID '${linkedRoomId}', but there is no such room.`)
+                            }
                             return (
                               <LinkView
                                 deleteLink={() => {
-                                  base.deleteLink(link.id);
-                                  baseDb.put(base);
+                                  base.deleteLink(base.links.indexOf(link));
+                                  setBaseData(base);
                                 }}
                                 key={linkIndex}
                                 linkableRooms={linkableRooms}
                                 linkedRoom={linkedRoom}
                                 linkIndex={linkIndex}
                                 roomIndex={r}
-                                setLinkedRoomName={(newLinkedRoomName: string) => {
-                                  const linkIndexInBaseSpec = base.status.links.findIndex((baseStatusLink) => baseStatusLink.id === link.id);
+                                setLinkedRoomId={(newLinkedRoomId: string) => {
+                                  const linkIndexInBaseSpec = base.links.indexOf(link);
                                   // The ternaries below are to avoid swapping rooms 0 and 1 inadvertently.
                                   // We just want to update the one room that has changed.
-                                  base.setLinkRoomNames(linkIndexInBaseSpec, {
-                                    0: link.spec.roomNames[0] === room.spec.name ? link.spec.roomNames[0] : newLinkedRoomName,
-                                    1: link.spec.roomNames[1] === room.spec.name ? link.spec.roomNames[1] : newLinkedRoomName,
+                                  base.setLinkRoomIds(linkIndexInBaseSpec, {
+                                    0: link.roomIds[0] === room.id ? link.roomIds[0] : newLinkedRoomId,
+                                    1: link.roomIds[1] === room.id ? link.roomIds[1] : newLinkedRoomId,
                                   });
-                                  baseDb.put(base);
+                                  setBaseData(base);
                                 }}
                                 setMessage={setMessage}
                               >
@@ -401,13 +306,13 @@ export function BaseView(): ReactElement {
                             disabled={linkableRooms.length <= 0}
                             id="link-add"
                             onClick={() => {
-                              const otherRoomName = linkableRooms[0].spec.name;
+                              const otherRoomId = linkableRooms[0].id;
                               try {
                                 base.addLink({
-                                  0: room.spec.name,
-                                  1: otherRoomName,
+                                  0: room.id,
+                                  1: otherRoomId,
                                 });
-                                baseDb.put(base);
+                                setBaseData(base);
                               } catch (err) {
                                 console.error(err);
                                 setMessage({
@@ -434,12 +339,8 @@ export function BaseView(): ReactElement {
             id="room-add"
             onClick={() => {
               try {
-                base.addRoom({
-                  color: randomColor(),
-                  name: '',
-                  size: 1,
-                });
-                baseDb.put(base);
+                base.addRoom(new Room());
+                setBaseData(base);
               } catch (err) {
                 console.error(err);
                 setMessage({
@@ -456,4 +357,75 @@ export function BaseView(): ReactElement {
     </div >
   );
 
+}
+
+function _createDefaultBase(): Base {
+  const bedroom = new Room({
+    color: "#048a49",
+    name: "bedroom 1",
+    size: 1,
+  });
+  const kitchen = new Room({
+    color: "#ff7373",
+    name: "kitchen",
+    size: 1,
+  });
+  const storage = new Room({
+    color: "#fc8332",
+    name: "storage",
+    size: 1,
+  });
+  const rooms = [
+    bedroom,
+    kitchen,
+    storage,
+  ];
+  const links = [
+    {
+      roomIds: {
+        0: kitchen.id,
+        1: storage.id,
+      },
+    }
+  ];
+  const base = new Base({
+    cells: [
+      [
+        {
+          roomsAllowed: [],
+        },
+        {
+          roomsAllowed: [],
+        },
+        {
+          roomsAllowed: rooms.map((room) => ({ id: room.id })),
+        },
+      ],
+      [
+        {
+          roomsAllowed: rooms.map((room) => ({ id: room.id })),
+        },
+        {
+          roomsAllowed: [],
+        },
+        {
+          roomsAllowed: rooms.map((room) => ({ id: room.id })),
+        },
+      ],
+      [
+        {
+          roomsAllowed: rooms.map((room) => ({ id: room.id })),
+        },
+        {
+          roomsAllowed: [],
+        },
+        {
+          roomsAllowed: [],
+        },
+      ],
+    ],
+    links,
+    rooms,
+  });
+  return base;
 }

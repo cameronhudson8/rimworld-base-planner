@@ -2,6 +2,7 @@
   aspect-ratio: 1.0;
   padding: 0;
   max-width: 16vw;
+  position: relative;
 }
 
 .cell select {
@@ -9,6 +10,18 @@
   background-color: inherit;
 }
 
-.cell-unusable {
+.cell-disabled {
   background-color: gray;
+}
+
+.cell-content {
+  transition: background-color 0.2s ease;
+}
+
+.cell-content:hover {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.dropdown-menu {
+  /* Dropdown styles are handled inline for dynamic positioning */
 }
