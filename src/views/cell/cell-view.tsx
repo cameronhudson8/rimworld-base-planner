@@ -130,7 +130,6 @@ export function CellView({
       {/* Dropdown menu */}
       {isDropdownOpen && (
         <div
-          className="dropdown-menu"
           ref={dropdownRef}
           style={{
             position: 'absolute',
@@ -148,7 +147,7 @@ export function CellView({
             fontSize: `${0.8 * windowDimensions.width / 256 * scaleFactor}rem`,
           }}
         >
-          {roomOptions.map((roomOption, roomIndex) => (
+          {roomOptions.sort((ro1, ro2) => ro1.name.localeCompare(ro2.name)).map((roomOption, roomIndex) => (
             <label
               key={roomIndex}
               style={{

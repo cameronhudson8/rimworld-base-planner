@@ -21,7 +21,3 @@
 .cell-content:hover {
   background-color: rgba(0, 0, 0, 0.1);
 }
-
-.dropdown-menu {
-  /* Dropdown styles are handled inline for dynamic positioning */
-}
