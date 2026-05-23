@@ -122,7 +122,6 @@ const LINK_SPECS: LinkSpec[] = [
   // Comedor / social
   { a: "Comedor",             b: "Bloque Dormitorios 1" },
   { a: "Comedor",             b: "Bloque Dormitorios 2" },
-  { a: "Comedor",             b: "Sala Recreativa" },
   { a: "Sala Recreativa",     b: "Bloque Dormitorios 1" },
   { a: "Sala Recreativa",     b: "Bloque Dormitorios 2" },
 
@@ -147,7 +146,6 @@ const LINK_SPECS: LinkSpec[] = [
   // Piedra
   { a: "Cantería",            b: "Almacén Trozos",      hard: true },
   { a: "Cantería",            b: "Almacén Piedra Pulida", hard: true },
-  { a: "Cantería",            b: "Almacén General" },
 
   // Escultura
   { a: "Escultor",            b: "Almacén Esculturas",  hard: true },
@@ -158,7 +156,6 @@ const LINK_SPECS: LinkSpec[] = [
   { a: "Fundición",           b: "Almacén General" },
   { a: "Mecanología",         b: "Almacén Armas",       hard: true },
   { a: "Mecanología",         b: "Almacén Munición",    hard: true },
-  { a: "Mecanología",         b: "Almacén General" },
 
   // Drogas
   { a: "Laboratorio Drogas",  b: "Almacén Drogas",      hard: true },
