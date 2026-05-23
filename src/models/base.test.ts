@@ -328,6 +328,33 @@ describe('Base', () => {
     expect(broken).toEqual([]);
   }, 60000);
 
+  test('optimize is monotonic: re-running never raises the energy', () => {
+    // The user expects: pressing Optimize twice in a row, with no config
+    // change in between, must never give a worse layout than the first run.
+    // The contract is enforced by _commitGlobalBest (only commits when
+    // globalBestEnergy < this.energy). This test pins that behavior so a
+    // future refactor can't silently break it.
+    const kitchen = new Room({ name: 'kitchen', size: 2 });
+    const freezer = new Room({ name: 'freezer', size: 2 });
+    const dining = new Room({ name: 'dining', size: 4 });
+    const filler = new Room({ name: 'filler', size: 28 });
+    const rooms = [kitchen, freezer, dining, filler];
+    const all = rooms.map((r) => ({ id: r.id }));
+    const cells = Array.from({ length: 6 }, () => Array.from({ length: 6 }, () => ({ roomsAllowed: all })));
+    const links = [
+      { roomIds: { 0: kitchen.id, 1: freezer.id }, weight: 5 },
+      { roomIds: { 0: kitchen.id, 1: dining.id }, weight: 5 },
+    ];
+    const base = new Base({ cells, links, rooms });
+    base.optimize({ iterations: 5000, restarts: 2 });
+    const energyAfterFirst = base.energy;
+    // Re-run a few times without touching config. Energy must never go up.
+    for (let i = 0; i < 3; i += 1) {
+      base.optimize({ iterations: 5000, restarts: 2 });
+      expect(base.energy).toBeLessThanOrEqual(energyAfterFirst);
+    }
+  }, 30000);
+
   test('optimize keeps a small (size-2) room contiguous even when pulled by a distant link', () => {
     // 6x6 grid. A size-2 room ("infirmary") is linked to a far-away room.
     // The annealer's swap-based moves can shear it apart while chasing the
