@@ -221,4 +221,142 @@ describe('Base', () => {
     expect(w5.energy).toBeGreaterThan(w1.energy);
   });
 
+  // ----- Connectivity / fragmentation -----
+  // Helper: count 4-connected components of a given roomId in a Base.
+  const countComponents = (base: Base, roomId: string): number => {
+    const roomCells = new Set<string>();
+    for (let i = 0; i < base.cells.length; i += 1) {
+      for (let j = 0; j < base.cells[i].length; j += 1) {
+        if (base.cells[i][j].roomId === roomId) {
+          roomCells.add(`${i},${j}`);
+        }
+      }
+    }
+    const visited = new Set<string>();
+    let components = 0;
+    for (const cellStr of roomCells) {
+      if (visited.has(cellStr)) continue;
+      components += 1;
+      const [si, sj] = cellStr.split(',').map(Number);
+      const queue = [[si, sj]];
+      while (queue.length > 0) {
+        const [i, j] = queue.shift()!;
+        const key = `${i},${j}`;
+        if (visited.has(key)) continue;
+        visited.add(key);
+        for (const [ni, nj] of [[i - 1, j], [i + 1, j], [i, j - 1], [i, j + 1]]) {
+          const nkey = `${ni},${nj}`;
+          if (roomCells.has(nkey) && !visited.has(nkey)) {
+            queue.push([ni, nj]);
+          }
+        }
+      }
+    }
+    return components;
+  };
+
+  test('fragmented layout is strictly more expensive than contiguous (same rooms)', () => {
+    // Two rooms of size 2, with no links between them. Whether they're
+    // contiguous or split into singletons changes nothing for link cost.
+    // The connectivity term must make the fragmented layout strictly worse.
+    const a = new Room({ name: 'a', size: 2 });
+    const b = new Room({ name: 'b', size: 2 });
+    const rooms = [a, b];
+    const all = rooms.map((r) => ({ id: r.id }));
+    const make = (grid: string[][]) => {
+      const cells = grid.map((row) => row.map((mark) => ({
+        roomsAllowed: all,
+        roomId: mark === 'A' ? a.id : mark === 'B' ? b.id : undefined,
+      })));
+      return new Base({ cells, links: [], rooms });
+    };
+    const contiguous = make([
+      ['A', 'A', '.', '.'],
+      ['.', '.', 'B', 'B'],
+      ['.', '.', '.', '.'],
+      ['.', '.', '.', '.'],
+    ]);
+    const fragmented = make([
+      ['A', '.', '.', 'A'],
+      ['B', '.', '.', 'B'],
+      ['.', '.', '.', '.'],
+      ['.', '.', '.', '.'],
+    ]);
+    expect(countComponents(contiguous, a.id)).toBe(1);
+    expect(countComponents(fragmented, a.id)).toBe(2);
+    // The fragmented layout MUST cost more than the contiguous one.
+    expect(fragmented.energy).toBeGreaterThan(contiguous.energy);
+  });
+
+  test('optimize keeps small rooms contiguous in a tight, link-heavy grid', () => {
+    // Stress case meant to reproduce the user-reported symptom: small rooms
+    // shearing apart while the annealer chases high-weight links. The grid is
+    // tight (no slack) and every small room is yanked by two competing links.
+    const N = 6;
+    const infirmary = new Room({ name: 'infirmary', size: 2 });
+    const kitchen = new Room({ name: 'kitchen', size: 2 });
+    const freezer = new Room({ name: 'freezer', size: 2 });
+    const pantry = new Room({ name: 'pantry', size: 2 });
+    const lab = new Room({ name: 'lab', size: 2 });
+    const dining = new Room({ name: 'dining', size: 4 });
+    const ward = new Room({ name: 'ward', size: 4 });
+    const filler = new Room({ name: 'filler', size: N * N - (2 * 5 + 4 * 2) });
+    const rooms = [infirmary, kitchen, freezer, pantry, lab, dining, ward, filler];
+    const all = rooms.map((r) => ({ id: r.id }));
+    const cells = Array.from({ length: N }, () =>
+      Array.from({ length: N }, () => ({ roomsAllowed: all }))
+    );
+    const links = [
+      // Each small room is pulled by two links — annealer is tempted to split them.
+      { roomIds: { 0: infirmary.id, 1: ward.id }, weight: 10 },
+      { roomIds: { 0: infirmary.id, 1: dining.id }, weight: 10 },
+      { roomIds: { 0: kitchen.id, 1: freezer.id }, weight: 10 },
+      { roomIds: { 0: kitchen.id, 1: dining.id }, weight: 10 },
+      { roomIds: { 0: pantry.id, 1: dining.id }, weight: 10 },
+      { roomIds: { 0: pantry.id, 1: kitchen.id }, weight: 10 },
+      { roomIds: { 0: lab.id, 1: ward.id }, weight: 10 },
+      { roomIds: { 0: lab.id, 1: dining.id }, weight: 10 },
+    ];
+    const base = new Base({ cells, links, rooms });
+    base.optimize({ iterations: 15000, restarts: 4 });
+
+    const broken: string[] = [];
+    for (const r of [infirmary, kitchen, freezer, pantry, lab, dining, ward]) {
+      const components = countComponents(base, r.id);
+      if (components > 1) broken.push(`${r.name} (${components} pieces)`);
+    }
+    expect(broken).toEqual([]);
+  }, 60000);
+
+  test('optimize keeps a small (size-2) room contiguous even when pulled by a distant link', () => {
+    // 6x6 grid. A size-2 room ("infirmary") is linked to a far-away room.
+    // The annealer's swap-based moves can shear it apart while chasing the
+    // link. With a proper connectivity penalty, the room must stay as one
+    // 4-connected block in the final layout.
+    const infirmary = new Room({ name: 'infirmary', size: 2 });
+    const kitchen = new Room({ name: 'kitchen', size: 2 });
+    const freezer = new Room({ name: 'freezer', size: 2 });
+    const dining = new Room({ name: 'dining', size: 4 });
+    const filler = new Room({ name: 'filler', size: 26 });
+    const rooms = [infirmary, kitchen, freezer, dining, filler];
+    const all = rooms.map((r) => ({ id: r.id }));
+    const cells = Array.from({ length: 6 }, () =>
+      Array.from({ length: 6 }, () => ({ roomsAllowed: all }))
+    );
+    // High-weight links that pull the small rooms around the grid.
+    const links = [
+      { roomIds: { 0: infirmary.id, 1: dining.id }, weight: 10 },
+      { roomIds: { 0: kitchen.id, 1: freezer.id }, weight: 10 },
+      { roomIds: { 0: kitchen.id, 1: dining.id }, weight: 10 },
+    ];
+    const base = new Base({ cells, links, rooms });
+    base.optimize({ iterations: 10000, restarts: 3 });
+
+    // Every named room must be a single connected block (filler can split).
+    for (const r of [infirmary, kitchen, freezer, dining]) {
+      const components = countComponents(base, r.id);
+      expect({ room: r.name, components }).toEqual({ room: r.name, components: 1 });
+    }
+  }, 30000);
+
 });

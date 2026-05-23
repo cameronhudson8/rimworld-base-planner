@@ -43,6 +43,8 @@ export interface OptimizeOptions {
   t0?: number;
   tFinal?: number;
   coolingRate?: number;
+  // Optional callback fired after each restart. Called with (completed, total).
+  onProgress?: (completedRestarts: number, totalRestarts: number) => void;
 };
 
 export interface BaseData {
@@ -307,13 +309,76 @@ export class Base implements BaseData {
       });
     }
 
+    // --- Intra-room connectivity (keep each room as one contiguous block) ----
+    // For each room: find its largest 4-connected component. Cells in the
+    // minority components are "isolated". For every isolated cell we add
+    //   (manhattan_distance_to_main_component + 1) * connectivityWeightPerCell
+    // The "+1" is a flat per-isolated-cell penalty; the manhattan distance is
+    // what gives the annealer a continuous gradient toward reabsorbing the
+    // stray cell into the main block (a step closer = strictly lower energy).
+    let connectivityPenalty = 0;
+    const connectivityWeightPerCell = 800;
+    for (const room of this.rooms) {
+      const roomCellsList = cellsByRoom.get(room.id) ?? [];
+      if (roomCellsList.length <= 1) continue;
+
+      const cellSet = new Set(roomCellsList.map((c) => `${c.i},${c.j}`));
+      const visited = new Set<string>();
+      // Each component as the set of its member-cell keys.
+      const components: Array<Array<{ i: number, j: number }>> = [];
+      for (const start of roomCellsList) {
+        const startKey = `${start.i},${start.j}`;
+        if (visited.has(startKey)) continue;
+        const component: Array<{ i: number, j: number }> = [];
+        const queue: Array<{ i: number, j: number }> = [start];
+        while (queue.length > 0) {
+          const cur = queue.shift()!;
+          const k = `${cur.i},${cur.j}`;
+          if (visited.has(k)) continue;
+          visited.add(k);
+          component.push(cur);
+          for (const [ni, nj] of [[cur.i - 1, cur.j], [cur.i + 1, cur.j], [cur.i, cur.j - 1], [cur.i, cur.j + 1]]) {
+            const nkey = `${ni},${nj}`;
+            if (cellSet.has(nkey) && !visited.has(nkey)) {
+              queue.push({ i: ni, j: nj });
+            }
+          }
+        }
+        components.push(component);
+      }
+      if (components.length <= 1) continue;
+
+      // Largest component (by cell count) wins ties by being the first found.
+      let mainIdx = 0;
+      for (let k = 1; k < components.length; k += 1) {
+        if (components[k].length > components[mainIdx].length) {
+          mainIdx = k;
+        }
+      }
+      const mainComponent = components[mainIdx];
+
+      for (let k = 0; k < components.length; k += 1) {
+        if (k === mainIdx) continue;
+        for (const stray of components[k]) {
+          let minDist = Number.POSITIVE_INFINITY;
+          for (const target of mainComponent) {
+            const d = Math.abs(stray.i - target.i) + Math.abs(stray.j - target.j);
+            if (d < minDist) minDist = d;
+          }
+          connectivityPenalty += (minDist + 1) * connectivityWeightPerCell;
+        }
+      }
+    }
+
     // Combine. Center-of-mass and intra-room use the original mean^power form
     // (they're well-behaved, low-magnitude terms). Adjacency is added linearly
     // — its constants are already large enough to dominate when violated.
+    // Connectivity penalty is also linear.
     const energy =
       (comCount === 0 ? 0 : Math.pow(comEnergy / comCount, centerOfMassWeight))
       + (intraCount === 0 ? 0 : Math.pow(intraEnergy / intraCount, intraRoomWeight))
-      + adjacencyWeight * adjacencyEnergy;
+      + adjacencyWeight * adjacencyEnergy
+      + connectivityPenalty;
 
     this.energy = energy;
     this.linkReports = linkReports;
@@ -350,19 +415,10 @@ export class Base implements BaseData {
     return this;
   }
 
-  optimize(options: OptimizeOptions = {}): Base {
-    const iterations = options.iterations ?? 30000;
-    const restarts = options.restarts ?? 4;
-    const t0 = options.t0 ?? 1.0;
-    const tFinal = options.tFinal ?? 1e-4;
-    // Geometric cooling: T(k) = t0 * coolingRate^k, choose coolingRate so we
-    // land on tFinal at the last iteration.
-    const coolingRate = options.coolingRate
-      ?? Math.pow(tFinal / t0, 1 / Math.max(1, iterations - 1));
-
-    // Pre-compute swappable cells once. The set of (i,j) coordinates that may
-    // ever change is constant across iterations — only the roomIds inside the
-    // cells flip. Recomputing each iteration cost most of the previous runtime.
+  // Runs a single annealing trajectory from a fresh copy of `this` and returns
+  // the lowest-energy snapshot found. Shared by sync `optimize` and async
+  // `optimizeAsync` so their per-restart behavior is identical.
+  private _runOneRestart(iterations: number, t0: number, coolingRate: number): { best: Base, bestEnergy: number } {
     type CellRef = { i: number, j: number, allowedRoomIds: Set<RoomId> };
     const buildSwappableRefs = (b: Base): CellRef[] => {
       const refs: CellRef[] = [];
@@ -370,12 +426,7 @@ export class Base implements BaseData {
         for (let j = 0; j < b.cells[i].length; j += 1) {
           const cell = b.cells[i][j];
           if (cell.roomsAllowed.length === 0) continue;
-          if (cell.roomsAllowed.length === 1) {
-            // Only swappable if some other cell allows a different room.
-            // (If every cell here only allows the same single room, swapping
-            // would be a no-op anyway.)
-            continue;
-          }
+          if (cell.roomsAllowed.length === 1) continue;
           refs.push({
             i,
             j,
@@ -386,91 +437,131 @@ export class Base implements BaseData {
       return refs;
     };
 
-    let globalBest: Base = new Base(this);
-    let globalBestEnergy = globalBest.energy;
+    const current = new Base(this);
+    let currentEnergy = current.energy;
+    let bestThisRun = new Base(current);
+    let bestEnergyThisRun = currentEnergy;
+    const swappable = buildSwappableRefs(current);
 
-    for (let restart = 0; restart < restarts; restart += 1) {
-      // Each restart begins from a fresh copy of the current configuration so
-      // different cooling trajectories explore different basins.
-      const current = new Base(this);
-      let currentEnergy = current.energy;
-      let bestThisRun = new Base(current);
-      let bestEnergyThisRun = currentEnergy;
-      const swappable = buildSwappableRefs(current);
+    if (swappable.length < 2) {
+      return { best: bestThisRun, bestEnergy: bestEnergyThisRun };
+    }
 
-      if (swappable.length < 2) {
-        if (currentEnergy < globalBestEnergy) {
-          globalBest = bestThisRun;
-          globalBestEnergy = bestEnergyThisRun;
-        }
+    let temperature = t0;
+    for (let iter = 0; iter < iterations; iter += 1) {
+      const a = swappable[(Math.random() * swappable.length) | 0];
+      const b = swappable[(Math.random() * swappable.length) | 0];
+      if (a === b) {
+        temperature *= coolingRate;
+        continue;
+      }
+      const cellA = current.cells[a.i][a.j];
+      const cellB = current.cells[b.i][b.j];
+      const aRoomId = cellA.roomId;
+      const bRoomId = cellB.roomId;
+      if (aRoomId === bRoomId) {
+        temperature *= coolingRate;
+        continue;
+      }
+      if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) {
+        temperature *= coolingRate;
+        continue;
+      }
+      if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) {
+        temperature *= coolingRate;
         continue;
       }
 
-      let temperature = t0;
-      for (let iter = 0; iter < iterations; iter += 1) {
-        // Pick two distinct swappable cells whose room IDs are mutually allowed
-        // and currently different.
-        const a = swappable[(Math.random() * swappable.length) | 0];
-        const b = swappable[(Math.random() * swappable.length) | 0];
-        if (a === b) {
-          temperature *= coolingRate;
-          continue;
-        }
-        const cellA = current.cells[a.i][a.j];
-        const cellB = current.cells[b.i][b.j];
-        const aRoomId = cellA.roomId;
-        const bRoomId = cellB.roomId;
-        if (aRoomId === bRoomId) {
-          temperature *= coolingRate;
-          continue;
-        }
-        if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) {
-          temperature *= coolingRate;
-          continue;
-        }
-        if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) {
-          temperature *= coolingRate;
-          continue;
-        }
+      cellA.roomId = bRoomId;
+      cellB.roomId = aRoomId;
+      current.reconcile();
+      const newEnergy = current.energy;
 
-        // Apply swap in-place, recompute energy, decide whether to keep it.
-        cellA.roomId = bRoomId;
-        cellB.roomId = aRoomId;
+      const dE = newEnergy - currentEnergy;
+      const accept = dE <= 0 || Math.random() < Math.exp(-dE / Math.max(temperature, 1e-12));
+      if (accept) {
+        currentEnergy = newEnergy;
+        if (newEnergy < bestEnergyThisRun) {
+          bestEnergyThisRun = newEnergy;
+          bestThisRun = new Base(current);
+        }
+      } else {
+        cellA.roomId = aRoomId;
+        cellB.roomId = bRoomId;
         current.reconcile();
-        const newEnergy = current.energy;
-
-        const dE = newEnergy - currentEnergy;
-        // Metropolis: always accept improvements; accept worse with prob exp(-dE/T).
-        const accept = dE <= 0 || Math.random() < Math.exp(-dE / Math.max(temperature, 1e-12));
-        if (accept) {
-          currentEnergy = newEnergy;
-          if (newEnergy < bestEnergyThisRun) {
-            bestEnergyThisRun = newEnergy;
-            bestThisRun = new Base(current);
-          }
-        } else {
-          // Revert the swap.
-          cellA.roomId = aRoomId;
-          cellB.roomId = bRoomId;
-          current.reconcile();
-        }
-
-        temperature *= coolingRate;
       }
 
-      if (bestEnergyThisRun < globalBestEnergy) {
-        globalBest = bestThisRun;
-        globalBestEnergy = bestEnergyThisRun;
-      }
+      temperature *= coolingRate;
     }
 
+    return { best: bestThisRun, bestEnergy: bestEnergyThisRun };
+  }
+
+  private _commitGlobalBest(globalBest: Base, globalBestEnergy: number): void {
     if (globalBestEnergy < this.energy) {
       globalBest.cells.forEach((cellRow, i) => cellRow.forEach((cell, j) => {
         this.cells[i][j].roomId = cell.roomId;
       }));
       this.reconcile();
     }
+  }
 
+  private _resolveOptimizeParams(options: OptimizeOptions): { iterations: number, restarts: number, t0: number, coolingRate: number } {
+    const iterations = options.iterations ?? 30000;
+    const restarts = options.restarts ?? 4;
+    const t0 = options.t0 ?? 1.0;
+    const tFinal = options.tFinal ?? 1e-4;
+    // Geometric cooling: T(k) = t0 * coolingRate^k, choose coolingRate so we
+    // land on tFinal at the last iteration.
+    const coolingRate = options.coolingRate
+      ?? Math.pow(tFinal / t0, 1 / Math.max(1, iterations - 1));
+    return { iterations, restarts, t0, coolingRate };
+  }
+
+  optimize(options: OptimizeOptions = {}): Base {
+    const { iterations, restarts, t0, coolingRate } = this._resolveOptimizeParams(options);
+
+    let globalBest: Base = new Base(this);
+    let globalBestEnergy = globalBest.energy;
+
+    for (let restart = 0; restart < restarts; restart += 1) {
+      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate);
+      if (bestEnergy < globalBestEnergy) {
+        globalBest = best;
+        globalBestEnergy = bestEnergy;
+      }
+      if (options.onProgress) {
+        options.onProgress(restart + 1, restarts);
+      }
+    }
+
+    this._commitGlobalBest(globalBest, globalBestEnergy);
+    return this;
+  }
+
+  // Same algorithm as `optimize`, but yields to the event loop between
+  // restarts so a UI can repaint progress and stay responsive. Use this from
+  // the browser; tests can keep using sync `optimize`.
+  async optimizeAsync(options: OptimizeOptions = {}): Promise<Base> {
+    const { iterations, restarts, t0, coolingRate } = this._resolveOptimizeParams(options);
+
+    let globalBest: Base = new Base(this);
+    let globalBestEnergy = globalBest.energy;
+
+    for (let restart = 0; restart < restarts; restart += 1) {
+      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate);
+      if (bestEnergy < globalBestEnergy) {
+        globalBest = best;
+        globalBestEnergy = bestEnergy;
+      }
+      if (options.onProgress) {
+        options.onProgress(restart + 1, restarts);
+      }
+      // Yield to the event loop so React can repaint the progress message.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
+    this._commitGlobalBest(globalBest, globalBestEnergy);
     return this;
   }
 
