@@ -33,13 +33,15 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Sala Recreativa",      size: 4, color: "#9cd986" },
 
   // --- COMIDA ---
-  { name: "Comedor",              size: 7, color: "#d96b3d" },
+  // Cadena: Cultivos → Congelador / Establo → Congelador Cuerpos → Carnicería
+  // → Congelador / Congelador → Cocina → Nevera → Comedor
+  { name: "Cultivos",             size: 3, color: "#7ed957" },
+  { name: "Congelador",           size: 5, color: "#5fa3d8" },
+  { name: "Congelador Cuerpos",   size: 2, color: "#404060" },
+  { name: "Carnicería",           size: 1, color: "#b03030" },
   { name: "Cocina",               size: 1, color: "#ff7373" },
   { name: "Nevera",               size: 2, color: "#a8d6f0" },
-  { name: "Congelador",           size: 4, color: "#5fa3d8" },
-  { name: "Carnicería",           size: 1, color: "#b03030" },
-  { name: "Congelador Cuerpos",   size: 2, color: "#404060" },
-  { name: "Hidropónica",          size: 3, color: "#7ed957" },
+  { name: "Comedor",              size: 4, color: "#d96b3d" },
 
   // --- ALCOHOL ---
   { name: "Cervecería",           size: 1, color: "#c9a14a" },
@@ -81,12 +83,12 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Crematorio",           size: 1, color: "#2a2a2a" },
 
   // --- ALMACENES PRINCIPALES ---
-  { name: "Almacén General",      size: 5, color: "#a08060" },
+  { name: "Almacén General",      size: 6, color: "#a08060" },
   { name: "Almacén Armas",        size: 1, color: "#603020" },
   { name: "Almacén Munición",     size: 1, color: "#503028" },
 
   // --- INVESTIGACIÓN / COMUNICACIONES ---
-  { name: "Investigador",         size: 2, color: "#8060a0" },
+  { name: "Investigador",         size: 3, color: "#8060a0" },
   { name: "Sala Servidores",      size: 1, color: "#5040a0" },
   { name: "Sala Comms",           size: 1, color: "#4080c0" },
 
@@ -101,12 +103,17 @@ const ROOM_SPECS: RoomSpec[] = [
 
 const LINK_SPECS: LinkSpec[] = [
   // Cadena alimentación (hards)
-  { a: "Cocina",              b: "Nevera",              hard: true },
-  { a: "Cocina",              b: "Congelador",          hard: true },
-  { a: "Nevera",              b: "Comedor",             hard: true },
-  { a: "Nevera",              b: "Congelador",          hard: true },
-  { a: "Carnicería",          b: "Congelador",          hard: true },
+  // Cultivos → Congelador
+  { a: "Cultivos",            b: "Congelador",          hard: true },
+  // Caza/Ganadería → Congelador Cuerpos → Carnicería → Congelador
+  { a: "Establo",             b: "Congelador Cuerpos",  hard: true },
   { a: "Carnicería",          b: "Congelador Cuerpos",  hard: true },
+  { a: "Carnicería",          b: "Congelador",          hard: true },
+  // Congelador → Cocina → Nevera → Comedor
+  { a: "Cocina",              b: "Congelador",          hard: true },
+  { a: "Cocina",              b: "Nevera",              hard: true },
+  { a: "Nevera",              b: "Comedor",             hard: true },
+  // Crematorio para cuerpos no procesados
   { a: "Crematorio",          b: "Congelador Cuerpos",  hard: true },
 
   // Comedor / social
@@ -115,9 +122,6 @@ const LINK_SPECS: LinkSpec[] = [
   { a: "Comedor",             b: "Sala Recreativa" },
   { a: "Sala Recreativa",     b: "Bloque Dormitorios 1" },
   { a: "Sala Recreativa",     b: "Bloque Dormitorios 2" },
-
-  // Hidropónica
-  { a: "Hidropónica",         b: "Cocina" },
 
   // Cervecería
   { a: "Cervecería",          b: "Almacén Alcohol",     hard: true },
