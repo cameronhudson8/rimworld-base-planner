@@ -10,6 +10,7 @@ import {
 import { RoomView } from "../room";
 import { LinkView } from "../link/link-view";
 import { RoomId } from "../../models/room";
+import { createLateGameVanillaBase } from "../../presets/late-game-vanilla";
 
 export enum MessageType {
   ERROR = "ERROR",
@@ -190,6 +191,33 @@ export function BaseView(): ReactElement {
         }}
       >
         Reset
+      </button>
+      <button
+        disabled={isOptimizing}
+        onClick={() => {
+          const agreed = window.confirm(
+            "Cargar el preset 'Late-game vainilla' (RimWorld, ~30 colonos, 9x9, 41 salas)?\n\n" +
+            "Esto reemplazará tu base actual de forma permanente."
+          );
+          if (agreed !== true) {
+            return;
+          }
+          try {
+            setBaseData(createLateGameVanillaBase());
+            setMessage({
+              type: MessageType.INFO,
+              text: "Preset cargado. Pulsa Optimize para distribuir las salas.",
+            });
+          } catch (err) {
+            console.error(err);
+            setMessage({
+              type: MessageType.ERROR,
+              text: String(err),
+            });
+          }
+        }}
+      >
+        Cargar preset: Late-game vainilla
       </button>
       <p>Current energy: {
         base.energy.toLocaleString(
