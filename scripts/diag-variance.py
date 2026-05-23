@@ -36,11 +36,11 @@ with sync_playwright() as p:
         # which changes Map iteration order and the reconcileCells output).
         page.goto("http://localhost:3000")
         page.wait_for_load_state("networkidle")
-        page.get_by_role("button", name="Cargar preset: Late-game vainilla").click()
-        page.wait_for_timeout(500)
-        print(f"\n=== RUN {run + 1}/{N_RUNS} ===")
+        page.get_by_role("button", name="Cargar preset: Late-game vainilla").click(no_wait_after=True)
+        page.wait_for_timeout(1500)  # let the preset paint
+        print(f"\n=== RUN {run + 1}/{N_RUNS} ===", flush=True)
         start = time.time()
-        page.get_by_role("button", name="Optimize", exact=True).click(no_wait_after=True)
+        page.get_by_role("button", name="Optimize", exact=True).click(no_wait_after=True, timeout=60000)
         while time.time() - start < 600:
             try:
                 text = page.locator("button").filter(has_text="Optimiz").first.inner_text(timeout=2000)
