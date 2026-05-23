@@ -180,6 +180,33 @@ export function BaseView(): ReactElement {
           }
         )
       }</p>
+      {base.linkReports.length > 0 && (() => {
+        const roomName = (id: string) => base.rooms.find((rm) => rm.id === id)?.name ?? id;
+        const unsatisfied = base.linkReports.filter((rep) => !rep.satisfied);
+        const satisfied = base.linkReports.filter((rep) => rep.satisfied);
+        return (
+          <div className="card flexbox-column">
+            <h3>Adjacency Report</h3>
+            <p>
+              {satisfied.length} of {base.linkReports.length} link(s) share at least one wall.
+            </p>
+            {unsatisfied.length > 0 && (
+              <ul style={{ marginTop: 0 }}>
+                {unsatisfied.map((rep, idx) => (
+                  <li
+                    key={`unsat-${idx}`}
+                    style={{ color: rep.hard ? "#b00020" : "#a06000" }}
+                  >
+                    {rep.hard ? "[HARD] " : ""}
+                    {roomName(rep.roomIds[0])} ↔ {roomName(rep.roomIds[1])}
+                    {" "}(weight {rep.weight}) — not adjacent
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })()}
       <h2>Base Configuration</h2>
       <div className="card flexbox-column">
         <div
@@ -271,6 +298,10 @@ export function BaseView(): ReactElement {
                             if (linkedRoom === undefined) {
                               throw new Error(`Room '${room.name}' has a link to a room with ID '${linkedRoomId}', but there is no such room.`)
                             }
+                            const report = base.linkReports.find((rep) =>
+                              (rep.roomIds[0] === link.roomIds[0] && rep.roomIds[1] === link.roomIds[1])
+                              || (rep.roomIds[0] === link.roomIds[1] && rep.roomIds[1] === link.roomIds[0])
+                            );
                             return (
                               <LinkView
                                 deleteLink={() => {
@@ -282,6 +313,10 @@ export function BaseView(): ReactElement {
                                 linkedRoom={linkedRoom}
                                 linkIndex={linkIndex}
                                 roomIndex={r}
+                                weight={link.weight}
+                                hard={link.hard}
+                                satisfied={report?.satisfied}
+                                sharedSides={report?.sharedSides}
                                 setLinkedRoomId={(newLinkedRoomId: string) => {
                                   const linkIndexInBaseSpec = base.links.indexOf(link);
                                   // The ternaries below are to avoid swapping rooms 0 and 1 inadvertently.
@@ -290,6 +325,16 @@ export function BaseView(): ReactElement {
                                     0: link.roomIds[0] === room.id ? link.roomIds[0] : newLinkedRoomId,
                                     1: link.roomIds[1] === room.id ? link.roomIds[1] : newLinkedRoomId,
                                   });
+                                  setBaseData(base);
+                                }}
+                                setLinkWeight={(newWeight: number) => {
+                                  const linkIndexInBaseSpec = base.links.indexOf(link);
+                                  base.setLinkWeight(linkIndexInBaseSpec, newWeight);
+                                  setBaseData(base);
+                                }}
+                                setLinkHard={(newHard: boolean) => {
+                                  const linkIndexInBaseSpec = base.links.indexOf(link);
+                                  base.setLinkHard(linkIndexInBaseSpec, newHard);
                                   setBaseData(base);
                                 }}
                                 setMessage={setMessage}
