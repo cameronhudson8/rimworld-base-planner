@@ -611,11 +611,27 @@ export class Base implements BaseData {
     return { passes, swaps: totalSwaps, threeCycles: totalThreeCycles, deltaEnergy: this.energy - startEnergy };
   }
 
-  // Runs a single annealing trajectory from a fresh copy of `this` and returns
-  // the lowest-energy snapshot found. Shared by sync `optimize` and async
-  // `optimizeAsync` so their per-restart behavior is identical.
-  private _runOneRestart(iterations: number, t0: number, coolingRate: number): { best: Base, bestEnergy: number } {
-    const current = new Base(this);
+  // Re-randomize a fraction p of swappable cells: pick a random allowed room
+  // (different from current) for each chosen cell. Used between restarts to
+  // perturb a good solution and explore nearby basins.
+  private _perturb(p: number): void {
+    const swappable = this._buildSwappableRefs();
+    for (const ref of swappable) {
+      if (Math.random() >= p) continue;
+      const cell = this.cells[ref.i][ref.j];
+      const options = cell.roomsAllowed.filter((r) => r.id !== cell.roomId);
+      if (options.length === 0) continue;
+      cell.roomId = options[(Math.random() * options.length) | 0].id;
+    }
+    this.reconcile();
+  }
+
+  // Runs a single annealing trajectory from the current state of `seed` (a
+  // fresh copy is made internally) and returns the lowest-energy snapshot
+  // found. Shared by sync `optimize` and async `optimizeAsync` so their
+  // per-restart behavior is identical.
+  private _runOneRestart(iterations: number, t0: number, coolingRate: number, seed: Base = this): { best: Base, bestEnergy: number } {
+    const current = new Base(seed);
     let currentEnergy = current.energy;
     let bestThisRun = new Base(current);
     let bestEnergyThisRun = currentEnergy;
@@ -686,7 +702,7 @@ export class Base implements BaseData {
 
   private _resolveOptimizeParams(options: OptimizeOptions): { iterations: number, restarts: number, t0: number, coolingRate: number } {
     const iterations = options.iterations ?? 50000;
-    const restarts = options.restarts ?? 6;
+    const restarts = options.restarts ?? 10;
     const t0 = options.t0 ?? 1.0;
     const tFinal = options.tFinal ?? 1e-4;
     // Geometric cooling: T(k) = t0 * coolingRate^k, choose coolingRate so we
@@ -702,11 +718,31 @@ export class Base implements BaseData {
     let globalBest: Base = new Base(this);
     let globalBestEnergy = globalBest.energy;
 
+    // Restart strategy:
+    //  - restart 0: raw initial state (explore the assignment basin).
+    //  - subsequent restarts: perturbative from global best (refine).
+    //  - if 2 consecutive restarts find no improvement, force a raw restart
+    //    so we escape the basin of the current global best entirely.
+    let perturbationP = 0.15;
+    let consecutiveStale = 0;
     for (let restart = 0; restart < restarts; restart += 1) {
-      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate);
+      let seed: Base;
+      if (restart === 0 || consecutiveStale >= 2) {
+        seed = this;
+        consecutiveStale = 0;
+      } else {
+        seed = new Base(globalBest);
+        seed._perturb(perturbationP);
+      }
+      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate, seed);
       if (bestEnergy < globalBestEnergy) {
         globalBest = best;
         globalBestEnergy = bestEnergy;
+        perturbationP = 0.15;
+        consecutiveStale = 0;
+      } else {
+        consecutiveStale += 1;
+        perturbationP = Math.min(0.5, 0.15 + 0.1 * consecutiveStale);
       }
       if (options.onProgress) {
         options.onProgress(restart + 1, restarts);
@@ -734,17 +770,35 @@ export class Base implements BaseData {
     /* eslint-disable no-console */
     console.log(`[optimize] start: ${iterations} iter × ${restarts} restarts, T0=${t0}, cooling=${coolingRate.toFixed(6)}; initial energy=${Math.round(globalBestEnergy).toLocaleString("en-US")}`);
 
+    let perturbationP = 0.15;
+    let consecutiveStale = 0;
     for (let restart = 0; restart < restarts; restart += 1) {
       const tStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
-      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate);
+      let seed: Base;
+      let seedNote = "raw";
+      if (restart === 0 || consecutiveStale >= 2) {
+        seed = this;
+        if (consecutiveStale >= 2) seedNote = "raw (escape)";
+        consecutiveStale = 0;
+      } else {
+        seed = new Base(globalBest);
+        seed._perturb(perturbationP);
+        seedNote = `from-best p=${perturbationP.toFixed(2)}`;
+      }
+      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate, seed);
       const tEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
       const improved = bestEnergy < globalBestEnergy;
       if (improved) {
         globalBest = best;
         globalBestEnergy = bestEnergy;
+        perturbationP = 0.15;
+        consecutiveStale = 0;
+      } else {
+        consecutiveStale += 1;
+        perturbationP = Math.min(0.5, 0.15 + 0.1 * consecutiveStale);
       }
       console.log(
-        `[optimize] restart ${restart + 1}/${restarts}: this=${Math.round(bestEnergy).toLocaleString("en-US")} `
+        `[optimize] restart ${restart + 1}/${restarts} (${seedNote}): this=${Math.round(bestEnergy).toLocaleString("en-US")} `
         + `global=${Math.round(globalBestEnergy).toLocaleString("en-US")}${improved ? " ↓" : ""} `
         + `(${((tEnd - tStart) / 1000).toFixed(1)}s)`
       );
