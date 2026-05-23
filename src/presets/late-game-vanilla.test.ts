@@ -1,12 +1,17 @@
 import { createLateGameVanillaBase } from "./late-game-vanilla";
 
 describe("createLateGameVanillaBase", () => {
-  test("rooms sum to 9x9 = 81 cells (preset fills grid exactly)", () => {
+  test("rooms fit inside 9x9 grid with breathing room for the optimizer", () => {
     const base = createLateGameVanillaBase();
     const totalSize = base.rooms.reduce((s, r) => s + r.size, 0);
-    expect(totalSize).toBe(81);
+    const capacity = 9 * 9;
     expect(base.cells.length).toBe(9);
     expect(base.cells[0].length).toBe(9);
+    expect(totalSize).toBeLessThanOrEqual(capacity);
+    // Want at least ~15% free cells so the optimizer has room to satisfy
+    // adjacency without being forced into bad local minima.
+    const free = capacity - totalSize;
+    expect(free).toBeGreaterThanOrEqual(Math.floor(capacity * 0.15));
   });
 
   test("every link references existing rooms", () => {

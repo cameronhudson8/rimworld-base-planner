@@ -2,11 +2,13 @@ import { Base } from "../models";
 import { Room, RoomId } from "../models/room";
 
 // Preset de base RimWorld late-game VAINILLA (sin DLCs) para 25-30 colonos
-// (capacidad ~96). Grid 9x9 = 81 celdas. Suma de tamaños = 81 (sin huecos).
+// (capacidad 48 con margen). Grid 9x9 = 81 celdas; ~54 ocupadas y ~27 libres
+// para dar holgura al optimizador y dejar espacio para pasillos/expansión.
 //
 // Convenciones:
-// - "celda" = módulo arquitectónico. 1 celda de dormitorio cabe 4 habitaciones
-//   con cama doble = 8 colonos.
+// - "celda" = ZONA 19x19 del juego (361 tiles). 1 celda da para una cocina
+//   completa, un comedor pequeño o una habitación grande. 1 celda de dormitorio
+//   contiene 4 habitaciones de 8x8 con cama doble = 8 colonos.
 // - hard: true = adyacencia obligatoria (penalización enorme si no se cumple).
 // - weight = importancia relativa entre soft-links; mayor = se respeta antes.
 //
@@ -28,32 +30,33 @@ interface LinkSpec {
 
 const ROOM_SPECS: RoomSpec[] = [
   // --- DESCANSO ---
-  { name: "Bloque Dormitorios 1", size: 6, color: "#3b8132" },
-  { name: "Bloque Dormitorios 2", size: 6, color: "#4ea342" },
-  { name: "Sala Recreativa",      size: 4, color: "#9cd986" },
+  // 3 cells de dormitorios × 8 colonos/cell = 24 cap por bloque (48 total).
+  { name: "Bloque Dormitorios 1", size: 3, color: "#3b8132" },
+  { name: "Bloque Dormitorios 2", size: 3, color: "#4ea342" },
+  { name: "Sala Recreativa",      size: 2, color: "#9cd986" },
 
   // --- COMIDA ---
   // Cadena: Cultivos → Congelador / Establo → Congelador Cuerpos → Carnicería
   // → Congelador / Congelador → Cocina → Nevera → Comedor
-  { name: "Cultivos",             size: 3, color: "#7ed957" },
-  { name: "Congelador",           size: 5, color: "#5fa3d8" },
-  { name: "Congelador Cuerpos",   size: 2, color: "#404060" },
+  { name: "Cultivos",             size: 2, color: "#7ed957" },
+  { name: "Congelador",           size: 2, color: "#5fa3d8" },
+  { name: "Congelador Cuerpos",   size: 1, color: "#404060" },
   { name: "Carnicería",           size: 1, color: "#b03030" },
   { name: "Cocina",               size: 1, color: "#ff7373" },
-  { name: "Nevera",               size: 2, color: "#a8d6f0" },
-  { name: "Comedor",              size: 4, color: "#d96b3d" },
+  { name: "Nevera",               size: 1, color: "#a8d6f0" },
+  { name: "Comedor",              size: 2, color: "#d96b3d" },
 
   // --- ALCOHOL ---
   { name: "Cervecería",           size: 1, color: "#c9a14a" },
   { name: "Almacén Alcohol",      size: 1, color: "#d4b876" },
 
   // --- MÉDICO ---
-  { name: "Enfermería",           size: 6, color: "#ffffff" },
+  { name: "Enfermería",           size: 2, color: "#ffffff" },
   { name: "Quirófano",            size: 1, color: "#e0f0ff" },
   { name: "Farmacia",             size: 1, color: "#d9eaf7" },
 
   // --- PRISIÓN ---
-  { name: "Prisión",              size: 2, color: "#555555" },
+  { name: "Prisión",              size: 1, color: "#555555" },
 
   // --- TEXTIL / ROPA ---
   { name: "Sastrería",            size: 1, color: "#b88dc1" },
@@ -83,12 +86,12 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Crematorio",           size: 1, color: "#2a2a2a" },
 
   // --- ALMACENES PRINCIPALES ---
-  { name: "Almacén General",      size: 6, color: "#a08060" },
+  { name: "Almacén General",      size: 3, color: "#a08060" },
   { name: "Almacén Armas",        size: 1, color: "#603020" },
   { name: "Almacén Munición",     size: 1, color: "#503028" },
 
   // --- INVESTIGACIÓN / COMUNICACIONES ---
-  { name: "Investigador",         size: 3, color: "#8060a0" },
+  { name: "Investigador",         size: 1, color: "#8060a0" },
   { name: "Sala Servidores",      size: 1, color: "#5040a0" },
   { name: "Sala Comms",           size: 1, color: "#4080c0" },
 
@@ -98,7 +101,7 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Sala Defensa",         size: 2, color: "#a02020" },
 
   // --- ANIMALES ---
-  { name: "Establo",              size: 3, color: "#a07050" },
+  { name: "Establo",              size: 2, color: "#a07050" },
 ];
 
 const LINK_SPECS: LinkSpec[] = [
@@ -188,9 +191,9 @@ export function createLateGameVanillaBase(): Base {
   const rooms = ROOM_SPECS.map((spec) => new Room(spec));
 
   const totalSize = rooms.reduce((s, r) => s + r.size, 0);
-  if (totalSize !== GRID_SIZE * GRID_SIZE) {
-    // Build-time invariant — fail loudly so the preset stays self-consistent.
-    throw new Error(`Late-game preset: room sizes sum to ${totalSize}, expected ${GRID_SIZE * GRID_SIZE}.`);
+  if (totalSize > GRID_SIZE * GRID_SIZE) {
+    // Hard invariant: can't request more cells than the grid has.
+    throw new Error(`Late-game preset: room sizes sum to ${totalSize}, exceeds grid capacity ${GRID_SIZE * GRID_SIZE}.`);
   }
 
   const byName: Record<string, RoomId> = Object.fromEntries(rooms.map((r) => [r.name, r.id]));
