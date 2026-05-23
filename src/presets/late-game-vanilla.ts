@@ -76,6 +76,7 @@ const ROOM_SPECS: RoomSpec[] = [
 
   // --- METAL ---
   { name: "Fundición",            size: 1, color: "#a04a2a" },
+  { name: "Almacén Metales",      size: 1, color: "#806858" },
   { name: "Mecanología",          size: 1, color: "#7a5040" },
 
   // --- DROGAS / MEDICAMENTOS ---
@@ -84,6 +85,7 @@ const ROOM_SPECS: RoomSpec[] = [
 
   // --- ENERGÍA / QUÍMICA ---
   { name: "Refinería Chemfuel",   size: 1, color: "#f0a050" },
+  { name: "Almacén Chemfuel",     size: 1, color: "#d88040" },
   { name: "Crematorio",           size: 1, color: "#2a2a2a" },
 
   // --- ALMACENES PRINCIPALES ---
@@ -146,24 +148,31 @@ const LINK_SPECS: LinkSpec[] = [
   // Piedra
   { a: "Cantería",            b: "Almacén Trozos",      hard: true },
   { a: "Cantería",            b: "Almacén Piedra Pulida", hard: true },
+  { a: "Almacén Trozos",      b: "Almacén General" },
+  { a: "Almacén Piedra Pulida", b: "Almacén General" },
 
   // Escultura
   { a: "Escultor",            b: "Almacén Esculturas",  hard: true },
   { a: "Escultor",            b: "Almacén Piedra Pulida" },
-  { a: "Escultor",            b: "Almacén General" },
+  { a: "Almacén Esculturas",  b: "Almacén General" },
 
   // Metal
-  { a: "Fundición",           b: "Almacén General" },
+  { a: "Fundición",           b: "Almacén Metales",     hard: true },
+  { a: "Mecanología",         b: "Almacén Metales",     hard: true },
   { a: "Mecanología",         b: "Almacén Armas",       hard: true },
   { a: "Mecanología",         b: "Almacén Munición",    hard: true },
+  { a: "Almacén Metales",     b: "Almacén General" },
+  { a: "Almacén Armas",       b: "Almacén General" },
+  { a: "Almacén Munición",    b: "Almacén General" },
 
   // Drogas
   { a: "Laboratorio Drogas",  b: "Almacén Drogas",      hard: true },
-  { a: "Laboratorio Drogas",  b: "Almacén General" },
+  { a: "Almacén Drogas",      b: "Almacén General" },
 
   // Energía / chemfuel
+  { a: "Refinería Chemfuel",  b: "Almacén Chemfuel",    hard: true },
   { a: "Refinería Chemfuel",  b: "Sala Baterías" },
-  { a: "Refinería Chemfuel",  b: "Almacén General" },
+  { a: "Almacén Chemfuel",    b: "Almacén General" },
 
   // Investigación
   { a: "Investigador",        b: "Sala Servidores",     hard: true },

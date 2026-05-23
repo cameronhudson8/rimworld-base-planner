@@ -49,13 +49,14 @@ describe("createLateGameVanillaBase", () => {
       return hard ? [`${a}|${b}`, `${b}|${a}`] : [];
     }));
     // Cadena cultivo → cocción → comedor
-    expect(linkPairs.has("Cultivos|Congelador")).toBe(true);
+    expect(linkPairs.has("Cultivos 1|Congelador")).toBe(true);
+    expect(linkPairs.has("Cultivos 2|Congelador")).toBe(true);
     expect(linkPairs.has("Cocina|Congelador")).toBe(true);
     expect(linkPairs.has("Cocina|Nevera")).toBe(true);
     expect(linkPairs.has("Nevera|Comedor")).toBe(true);
     // Cadena ganadería → procesado
-    expect(linkPairs.has("Establo|Congelador Cuerpos")).toBe(true);
-    expect(linkPairs.has("Carnicería|Congelador Cuerpos")).toBe(true);
+    expect(linkPairs.has("Establo|Depósito Frigorífico")).toBe(true);
+    expect(linkPairs.has("Carnicería|Depósito Frigorífico")).toBe(true);
     expect(linkPairs.has("Carnicería|Congelador")).toBe(true);
   });
 });
