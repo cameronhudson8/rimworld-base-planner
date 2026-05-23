@@ -45,7 +45,7 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Carnicería",           size: 1, color: "#b03030" },
   { name: "Cocina",               size: 1, color: "#ff7373" },
   { name: "Nevera",               size: 1, color: "#a8d6f0" },
-  { name: "Comedor",              size: 2, color: "#d96b3d" },
+  { name: "Comedor",              size: 3, color: "#d96b3d" },
 
   // --- ALCOHOL ---
   { name: "Cervecería",           size: 1, color: "#c9a14a" },
@@ -87,7 +87,7 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Crematorio",           size: 1, color: "#2a2a2a" },
 
   // --- ALMACENES PRINCIPALES ---
-  { name: "Almacén General",      size: 3, color: "#a08060" },
+  { name: "Almacén General",      size: 4, color: "#a08060" },
   { name: "Almacén Armas",        size: 1, color: "#603020" },
   { name: "Almacén Munición",     size: 1, color: "#503028" },
 
