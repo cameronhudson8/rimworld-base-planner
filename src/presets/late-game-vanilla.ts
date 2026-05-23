@@ -36,11 +36,12 @@ const ROOM_SPECS: RoomSpec[] = [
   { name: "Sala Recreativa",      size: 2, color: "#9cd986" },
 
   // --- COMIDA ---
-  // Cadena: Cultivos → Congelador / Establo → Congelador Cuerpos → Carnicería
+  // Cadena: Cultivos → Congelador / Establo → Depósito Frigorífico → Carnicería
   // → Congelador / Congelador → Cocina → Nevera → Comedor
-  { name: "Cultivos",             size: 2, color: "#7ed957" },
+  { name: "Cultivos 1",             size: 1, color: "#7ed957" },
+  { name: "Cultivos 2",             size: 1, color: "#7ed957" },
   { name: "Congelador",           size: 2, color: "#5fa3d8" },
-  { name: "Congelador Cuerpos",   size: 1, color: "#404060" },
+  { name: "Depósito Frigorífico",   size: 1, color: "#404060" },
   { name: "Carnicería",           size: 1, color: "#b03030" },
   { name: "Cocina",               size: 1, color: "#ff7373" },
   { name: "Nevera",               size: 1, color: "#a8d6f0" },
@@ -107,18 +108,17 @@ const ROOM_SPECS: RoomSpec[] = [
 const LINK_SPECS: LinkSpec[] = [
   // Cadena alimentación (hards)
   // Cultivos → Congelador
-  { a: "Cultivos",            b: "Congelador",          hard: true },
-  // Caza/Ganadería → Congelador Cuerpos → Carnicería → Congelador
-  { a: "Establo",             b: "Congelador Cuerpos",  hard: true },
-  { a: "Carnicería",          b: "Congelador Cuerpos",  hard: true },
+  { a: "Cultivos 1",            b: "Congelador",          hard: true },
+  { a: "Cultivos 2",            b: "Congelador",          hard: true },
+  // Caza/Ganadería → Depósito Frigorífico → Carnicería → Congelador
+  { a: "Establo",             b: "Depósito Frigorífico",  hard: true },
+  { a: "Carnicería",          b: "Depósito Frigorífico",  hard: true },
   { a: "Carnicería",          b: "Congelador",          hard: true },
   // Congelador → Cocina → Nevera → Comedor
   { a: "Cocina",              b: "Congelador",          hard: true },
   { a: "Cocina",              b: "Nevera",              hard: true },
   { a: "Nevera",              b: "Comedor",             hard: true },
-  // Crematorio para cuerpos no procesados
-  { a: "Crematorio",          b: "Congelador Cuerpos",  hard: true },
-
+  
   // Comedor / social
   { a: "Comedor",             b: "Bloque Dormitorios 1" },
   { a: "Comedor",             b: "Bloque Dormitorios 2" },
@@ -132,8 +132,7 @@ const LINK_SPECS: LinkSpec[] = [
 
   // Médico
   { a: "Enfermería",          b: "Farmacia",            hard: true },
-  { a: "Enfermería",          b: "Quirófano",           hard: true },
-  { a: "Farmacia",            b: "Quirófano",           hard: true },
+  { a: "Quirófano",            b: "Farmacia",           hard: true },
   { a: "Enfermería",          b: "Bloque Dormitorios 1" },
   { a: "Enfermería",          b: "Bloque Dormitorios 2" },
 
