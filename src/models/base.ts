@@ -317,7 +317,12 @@ export class Base implements BaseData {
     // what gives the annealer a continuous gradient toward reabsorbing the
     // stray cell into the main block (a step closer = strictly lower energy).
     let connectivityPenalty = 0;
-    const connectivityWeightPerCell = 800;
+    // 5000 means a stray cell at manhattan-distance 1 costs 10,000 — strictly
+    // more than satisfying a single soft link of weight 10. Rationale: in the
+    // actual game, colonists cannot walk between the two pieces of a
+    // "fragmented" room, so the room isn't really a room. Better to lose a
+    // soft adjacency than to ship a layout the player can't actually build.
+    const connectivityWeightPerCell = 5000;
     for (const room of this.rooms) {
       const roomCellsList = cellsByRoom.get(room.id) ?? [];
       if (roomCellsList.length <= 1) continue;
@@ -415,33 +420,206 @@ export class Base implements BaseData {
     return this;
   }
 
+  // Cells whose roomId may flip during optimization, with their roomsAllowed
+  // pre-indexed for fast swap legality checks.
+  private _buildSwappableRefs(): Array<{ i: number, j: number, allowedRoomIds: Set<RoomId> }> {
+    const refs: Array<{ i: number, j: number, allowedRoomIds: Set<RoomId> }> = [];
+    for (let i = 0; i < this.cells.length; i += 1) {
+      for (let j = 0; j < this.cells[i].length; j += 1) {
+        const cell = this.cells[i][j];
+        if (cell.roomsAllowed.length === 0) continue;
+        if (cell.roomsAllowed.length === 1) continue;
+        refs.push({
+          i,
+          j,
+          allowedRoomIds: new Set(cell.roomsAllowed.map((r) => r.id)),
+        });
+      }
+    }
+    return refs;
+  }
+
+  // Deterministic local-minimum polish: try every pair of swappable cells and
+  // accept any swap that strictly lowers energy. Repeat until a full pass
+  // finds no improvement. This closes the "obvious local minima" the
+  // randomized annealer often leaves on the table (e.g. a fragmented room
+  // whose stray cell could absorb back with a single swap that the annealer
+  // never sampled, or a soft link that could be satisfied for free).
+  //
+  // Cost: each pass is O(swappable² × energyEvalCost). For ~80 swappable cells
+  // and 9×9 grid that's a few seconds at most. The pass count is bounded by
+  // MAX_PASSES as a safety, though in practice it converges in 2-4 passes.
+  greedyImprove(): { passes: number, swaps: number, threeCycles: number, deltaEnergy: number } {
+    const MAX_PASSES = 12;
+    const swappable = this._buildSwappableRefs();
+    if (swappable.length < 2) return { passes: 0, swaps: 0, threeCycles: 0, deltaEnergy: 0 };
+
+    const startEnergy = this.energy;
+    let totalSwaps = 0;
+    let totalThreeCycles = 0;
+    let passes = 0;
+
+    // --- Pass A: 2-swap until convergence -----------------------------------
+    let improved = true;
+    while (improved && passes < MAX_PASSES) {
+      improved = false;
+      passes += 1;
+      for (let i = 0; i < swappable.length; i += 1) {
+        for (let j = i + 1; j < swappable.length; j += 1) {
+          const a = swappable[i];
+          const b = swappable[j];
+          const cellA = this.cells[a.i][a.j];
+          const cellB = this.cells[b.i][b.j];
+          const aRoomId = cellA.roomId;
+          const bRoomId = cellB.roomId;
+          if (aRoomId === bRoomId) continue;
+          if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) continue;
+          if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) continue;
+
+          const energyBefore = this.energy;
+          cellA.roomId = bRoomId;
+          cellB.roomId = aRoomId;
+          this.reconcile();
+          if (this.energy < energyBefore) {
+            improved = true;
+            totalSwaps += 1;
+          } else {
+            cellA.roomId = aRoomId;
+            cellB.roomId = bRoomId;
+            this.reconcile();
+          }
+        }
+      }
+    }
+
+    // --- Pass B: 3-cycle moves to escape pairwise local minima --------------
+    // For each triple of swappable cells with three distinct rooms, try both
+    // cyclic rotations (the only non-swap permutations of 3 items). A 3-cycle
+    // can free up fragmented rooms whose unfragmentation would require
+    // breaking a hard link if done with a single 2-swap.
+    //
+    // Naive O(N³) would mean ~165k triples × reconcile (~10ms) = minutes.
+    // We restrict to triples whose 3 cells fit inside a manhattan-diameter
+    // window — useful 3-cycles for fragmentation and adjacency are always
+    // geographically local. Diameter 4 ≈ a 5x5 spatial window, big enough to
+    // hop a single cell across a hard-link wall.
+    const TRIPLE_MAX_DIAMETER = 4;
+    const manh = (p: { i: number, j: number }, q: { i: number, j: number }) =>
+      Math.abs(p.i - q.i) + Math.abs(p.j - q.j);
+
+    let outerImproved = true;
+    let outerPasses = 0;
+    while (outerImproved && outerPasses < 4) {
+      outerImproved = false;
+      outerPasses += 1;
+      for (let i = 0; i < swappable.length; i += 1) {
+        for (let j = i + 1; j < swappable.length; j += 1) {
+          if (manh(swappable[i], swappable[j]) > TRIPLE_MAX_DIAMETER) continue;
+          for (let k = j + 1; k < swappable.length; k += 1) {
+            if (manh(swappable[i], swappable[k]) > TRIPLE_MAX_DIAMETER) continue;
+            if (manh(swappable[j], swappable[k]) > TRIPLE_MAX_DIAMETER) continue;
+            const a = swappable[i];
+            const b = swappable[j];
+            const c = swappable[k];
+            const cellA = this.cells[a.i][a.j];
+            const cellB = this.cells[b.i][b.j];
+            const cellC = this.cells[c.i][c.j];
+            const rA = cellA.roomId;
+            const rB = cellB.roomId;
+            const rC = cellC.roomId;
+            // Require three distinct rooms (otherwise a 3-cycle reduces to a 2-swap).
+            if (rA === rB || rB === rC || rA === rC) continue;
+
+            const energyBefore = this.energy;
+
+            // Cycle 1: A←rC, B←rA, C←rB
+            if ((rC === undefined || a.allowedRoomIds.has(rC))
+              && (rA === undefined || b.allowedRoomIds.has(rA))
+              && (rB === undefined || c.allowedRoomIds.has(rB))) {
+              cellA.roomId = rC;
+              cellB.roomId = rA;
+              cellC.roomId = rB;
+              this.reconcile();
+              if (this.energy < energyBefore) {
+                totalThreeCycles += 1;
+                outerImproved = true;
+                continue;
+              }
+              cellA.roomId = rA;
+              cellB.roomId = rB;
+              cellC.roomId = rC;
+              this.reconcile();
+            }
+
+            // Cycle 2: A←rB, B←rC, C←rA
+            if ((rB === undefined || a.allowedRoomIds.has(rB))
+              && (rC === undefined || b.allowedRoomIds.has(rC))
+              && (rA === undefined || c.allowedRoomIds.has(rA))) {
+              cellA.roomId = rB;
+              cellB.roomId = rC;
+              cellC.roomId = rA;
+              this.reconcile();
+              if (this.energy < energyBefore) {
+                totalThreeCycles += 1;
+                outerImproved = true;
+                continue;
+              }
+              cellA.roomId = rA;
+              cellB.roomId = rB;
+              cellC.roomId = rC;
+              this.reconcile();
+            }
+          }
+        }
+      }
+
+      // After each successful 3-cycle pass, run 2-swap to convergence again.
+      if (outerImproved) {
+        let innerImproved = true;
+        while (innerImproved && passes < MAX_PASSES) {
+          innerImproved = false;
+          passes += 1;
+          for (let i = 0; i < swappable.length; i += 1) {
+            for (let j = i + 1; j < swappable.length; j += 1) {
+              const a = swappable[i];
+              const b = swappable[j];
+              const cellA = this.cells[a.i][a.j];
+              const cellB = this.cells[b.i][b.j];
+              const aRoomId = cellA.roomId;
+              const bRoomId = cellB.roomId;
+              if (aRoomId === bRoomId) continue;
+              if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) continue;
+              if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) continue;
+              const energyBefore = this.energy;
+              cellA.roomId = bRoomId;
+              cellB.roomId = aRoomId;
+              this.reconcile();
+              if (this.energy < energyBefore) {
+                innerImproved = true;
+                totalSwaps += 1;
+              } else {
+                cellA.roomId = aRoomId;
+                cellB.roomId = bRoomId;
+                this.reconcile();
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return { passes, swaps: totalSwaps, threeCycles: totalThreeCycles, deltaEnergy: this.energy - startEnergy };
+  }
+
   // Runs a single annealing trajectory from a fresh copy of `this` and returns
   // the lowest-energy snapshot found. Shared by sync `optimize` and async
   // `optimizeAsync` so their per-restart behavior is identical.
   private _runOneRestart(iterations: number, t0: number, coolingRate: number): { best: Base, bestEnergy: number } {
-    type CellRef = { i: number, j: number, allowedRoomIds: Set<RoomId> };
-    const buildSwappableRefs = (b: Base): CellRef[] => {
-      const refs: CellRef[] = [];
-      for (let i = 0; i < b.cells.length; i += 1) {
-        for (let j = 0; j < b.cells[i].length; j += 1) {
-          const cell = b.cells[i][j];
-          if (cell.roomsAllowed.length === 0) continue;
-          if (cell.roomsAllowed.length === 1) continue;
-          refs.push({
-            i,
-            j,
-            allowedRoomIds: new Set(cell.roomsAllowed.map((r) => r.id)),
-          });
-        }
-      }
-      return refs;
-    };
-
     const current = new Base(this);
     let currentEnergy = current.energy;
     let bestThisRun = new Base(current);
     let bestEnergyThisRun = currentEnergy;
-    const swappable = buildSwappableRefs(current);
+    const swappable = current._buildSwappableRefs();
 
     if (swappable.length < 2) {
       return { best: bestThisRun, bestEnergy: bestEnergyThisRun };
@@ -535,6 +713,10 @@ export class Base implements BaseData {
       }
     }
 
+    // Polish the best-of-restarts with deterministic local search.
+    globalBest.greedyImprove();
+    globalBestEnergy = globalBest.energy;
+
     this._commitGlobalBest(globalBest, globalBestEnergy);
     return this;
   }
@@ -571,6 +753,22 @@ export class Base implements BaseData {
       }
       // Yield to the event loop so React can repaint the progress message.
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
+    // Deterministic polish: try every swap pair and accept any improvement.
+    // Cleans up obvious local minima the annealer left behind.
+    const greedyStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const greedyResult = globalBest.greedyImprove();
+    const greedyEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    if (greedyResult.swaps > 0 || greedyResult.threeCycles > 0) {
+      console.log(
+        `[optimize] greedy polish: ${greedyResult.swaps} swap(s) + ${greedyResult.threeCycles} 3-cycle(s) in ${greedyResult.passes} pass(es), `
+        + `energy ${Math.round(globalBestEnergy).toLocaleString("en-US")} → ${Math.round(globalBest.energy).toLocaleString("en-US")} `
+        + `(${((greedyEnd - greedyStart) / 1000).toFixed(1)}s)`
+      );
+      globalBestEnergy = globalBest.energy;
+    } else {
+      console.log(`[optimize] greedy polish: no improvement (${greedyResult.passes} pass(es), ${((greedyEnd - greedyStart) / 1000).toFixed(1)}s)`);
     }
 
     this._commitGlobalBest(globalBest, globalBestEnergy);
