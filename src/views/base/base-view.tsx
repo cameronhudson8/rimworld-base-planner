@@ -264,8 +264,16 @@ export function BaseView(): ReactElement {
       <div>
         {
           base.rooms
-            .map((room, r) => (
+            .map((room, r) => {
+              let assignedCells = 0;
+              for (const row of base.cells) {
+                for (const cell of row) {
+                  if (cell.roomId === room.id) assignedCells += 1;
+                }
+              }
+              return (
               <RoomView
+                assignedCells={assignedCells}
                 deleteRoom={() => {
                   base.deleteRoom(r);
                   setBaseData(base);
@@ -394,7 +402,8 @@ export function BaseView(): ReactElement {
                     );
                   })()}
               </RoomView>
-            ))
+              );
+            })
         }
         <div
           className="labeled-element"

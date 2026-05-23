@@ -3,6 +3,7 @@ import { RoomData } from "../../models/room";
 import { MessageType } from "../base/base-view";
 
 interface RoomViewProps {
+  assignedCells: number,
   children: ReactElement,
   deleteRoom: () => void,
   room: RoomData,
@@ -13,7 +14,20 @@ interface RoomViewProps {
   setRoomSize: (newRoomSize: number) => void;
 }
 
-export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, setRoomColor, setRoomName, setRoomSize }: RoomViewProps): ReactElement {
+export function RoomView({ assignedCells, children, deleteRoom, roomIndex, room, setMessage, setRoomColor, setRoomName, setRoomSize }: RoomViewProps): ReactElement {
+  const sizeWarning: { text: string, color: string } | null = (() => {
+    if (room.size <= 0) {
+      return { text: "⚠ Sin tamaño — no aparecerá en el layout", color: "#b00020" };
+    }
+    if (assignedCells < room.size) {
+      const missing = room.size - assignedCells;
+      return {
+        text: `⚠ ${assignedCells}/${room.size} celdas asignadas — faltan ${missing}. Amplía el grid o reduce otras salas.`,
+        color: "#b00020",
+      };
+    }
+    return null;
+  })();
 
   return (
     <div className="card flexbox-row" >
@@ -66,6 +80,18 @@ export function RoomView({ children, deleteRoom, roomIndex, room, setMessage, se
           type="number"
           value={room.size}
         />
+        {sizeWarning !== null && (
+          <small
+            style={{
+              color: sizeWarning.color,
+              display: "block",
+              marginTop: "0.25rem",
+              maxWidth: "20rem",
+            }}
+          >
+            {sizeWarning.text}
+          </small>
+        )}
       </div>
       <div
         className="labeled-element"
