@@ -64,6 +64,9 @@ export function BaseView(): ReactElement {
     type: MessageType.INFO,
   });
 
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizeProgress, setOptimizeProgress] = useState<{ done: number, total: number } | null>(null);
+
   return (
     <div>
       <div className="cell-grid">
@@ -128,14 +131,29 @@ export function BaseView(): ReactElement {
       }
 
       <button
-        onClick={() => {
+        disabled={isOptimizing}
+        onClick={async () => {
+          setIsOptimizing(true);
+          setOptimizeProgress({ done: 0, total: 0 });
+          setMessage({
+            type: MessageType.INFO,
+            text: "Optimizing...",
+          });
           try {
+            await base.optimizeAsync({
+              onProgress: (done, total) => {
+                setOptimizeProgress({ done, total });
+                setMessage({
+                  type: MessageType.INFO,
+                  text: `Optimizing... restart ${done}/${total}`,
+                });
+              },
+            });
+            setBaseData(base);
             setMessage({
               type: MessageType.INFO,
-              text: "Optimizing...",
+              text: 'Optimization complete.',
             });
-            base.optimize();
-            setBaseData(base);
           } catch (err) {
             console.error(err);
             setMessage({
@@ -143,14 +161,16 @@ export function BaseView(): ReactElement {
               text: String(err),
             });
           } finally {
-            setMessage({
-              type: MessageType.INFO,
-              text: 'Ready.',
-            });
+            setIsOptimizing(false);
+            setOptimizeProgress(null);
           }
         }}
       >
-        Optimize
+        {isOptimizing && optimizeProgress
+          ? (optimizeProgress.total > 0
+            ? `Optimizing... ${optimizeProgress.done}/${optimizeProgress.total}`
+            : 'Optimizing...')
+          : 'Optimize'}
       </button>
       <button
         onClick={() => {
