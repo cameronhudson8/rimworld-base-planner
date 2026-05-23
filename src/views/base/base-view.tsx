@@ -10,6 +10,7 @@ import {
 import { RoomView } from "../room";
 import { LinkView } from "../link/link-view";
 import { RoomId } from "../../models/room";
+import { createLateGameVanillaBase } from "../../presets/late-game-vanilla";
 
 export enum MessageType {
   ERROR = "ERROR",
@@ -63,6 +64,9 @@ export function BaseView(): ReactElement {
     text: "Ready.",
     type: MessageType.INFO,
   });
+
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizeProgress, setOptimizeProgress] = useState<{ done: number, total: number } | null>(null);
 
   return (
     <div>
@@ -128,14 +132,29 @@ export function BaseView(): ReactElement {
       }
 
       <button
-        onClick={() => {
+        disabled={isOptimizing}
+        onClick={async () => {
+          setIsOptimizing(true);
+          setOptimizeProgress({ done: 0, total: 0 });
+          setMessage({
+            type: MessageType.INFO,
+            text: "Optimizing...",
+          });
           try {
+            await base.optimizeAsync({
+              onProgress: (done, total) => {
+                setOptimizeProgress({ done, total });
+                setMessage({
+                  type: MessageType.INFO,
+                  text: `Optimizing... restart ${done}/${total}`,
+                });
+              },
+            });
+            setBaseData(base);
             setMessage({
               type: MessageType.INFO,
-              text: "Optimizing...",
+              text: 'Optimization complete.',
             });
-            base.optimize();
-            setBaseData(base);
           } catch (err) {
             console.error(err);
             setMessage({
@@ -143,14 +162,16 @@ export function BaseView(): ReactElement {
               text: String(err),
             });
           } finally {
-            setMessage({
-              type: MessageType.INFO,
-              text: 'Ready.',
-            });
+            setIsOptimizing(false);
+            setOptimizeProgress(null);
           }
         }}
       >
-        Optimize
+        {isOptimizing && optimizeProgress
+          ? (optimizeProgress.total > 0
+            ? `Optimizing... ${optimizeProgress.done}/${optimizeProgress.total}`
+            : 'Optimizing...')
+          : 'Optimize'}
       </button>
       <button
         onClick={() => {
@@ -171,15 +192,66 @@ export function BaseView(): ReactElement {
       >
         Reset
       </button>
-      <p>Current energy: {
-        base.energy.toLocaleString(
-          undefined,
-          {
-            minimumSignificantDigits: 4,
-            maximumSignificantDigits: 4,
+      <button
+        disabled={isOptimizing}
+        onClick={() => {
+          const agreed = window.confirm(
+            "Cargar el preset 'Late-game vainilla' (RimWorld, ~30 colonos, 9x9, 41 salas)?\n\n" +
+            "Esto reemplazará tu base actual de forma permanente."
+          );
+          if (agreed !== true) {
+            return;
           }
-        )
-      }</p>
+          try {
+            setBaseData(createLateGameVanillaBase());
+            setMessage({
+              type: MessageType.INFO,
+              text: "Preset cargado. Pulsa Optimize para distribuir las salas.",
+            });
+          } catch (err) {
+            console.error(err);
+            setMessage({
+              type: MessageType.ERROR,
+              text: String(err),
+            });
+          }
+        }}
+      >
+        Cargar preset: Late-game vainilla
+      </button>
+      <p>Current energy: {
+        // Force en-US grouping so a high energy (e.g. 17,010) is never
+        // mistaken for a low one (17.010 in locales using comma as decimal).
+        // Round to integer: at this scale the fractional part isn't meaningful.
+        Math.round(base.energy).toLocaleString("en-US")
+      } <small style={{ color: "#888" }}>(lower is better; ~1000+ usually means an unsatisfied link)</small></p>
+      {base.linkReports.length > 0 && (() => {
+        const roomName = (id: string) => base.rooms.find((rm) => rm.id === id)?.name ?? id;
+        const unsatisfied = base.linkReports.filter((rep) => !rep.satisfied);
+        const satisfied = base.linkReports.filter((rep) => rep.satisfied);
+        return (
+          <div className="card flexbox-column">
+            <h3>Adjacency Report</h3>
+            <p>
+              {satisfied.length} of {base.linkReports.length} link(s) share at least one wall.
+            </p>
+            {unsatisfied.length > 0 && (
+              <ul style={{ marginTop: 0 }}>
+                {unsatisfied.map((rep, idx) => (
+                  <li
+                    key={`unsat-${idx}`}
+                    style={{ color: rep.hard ? "#b00020" : "#a06000" }}
+                  >
+                    {rep.hard ? "[HARD] " : ""}
+                    {roomName(rep.roomIds[0])} ↔ {roomName(rep.roomIds[1])}
+                    {" "}(weight {rep.weight}) — not adjacent
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })()}
       <h2>Base Configuration</h2>
       <div className="card flexbox-column">
         <div
@@ -217,8 +289,16 @@ export function BaseView(): ReactElement {
       <div>
         {
           base.rooms
-            .map((room, r) => (
+            .map((room, r) => {
+              let assignedCells = 0;
+              for (const row of base.cells) {
+                for (const cell of row) {
+                  if (cell.roomId === room.id) assignedCells += 1;
+                }
+              }
+              return (
               <RoomView
+                assignedCells={assignedCells}
                 deleteRoom={() => {
                   base.deleteRoom(r);
                   setBaseData(base);
@@ -271,6 +351,10 @@ export function BaseView(): ReactElement {
                             if (linkedRoom === undefined) {
                               throw new Error(`Room '${room.name}' has a link to a room with ID '${linkedRoomId}', but there is no such room.`)
                             }
+                            const report = base.linkReports.find((rep) =>
+                              (rep.roomIds[0] === link.roomIds[0] && rep.roomIds[1] === link.roomIds[1])
+                              || (rep.roomIds[0] === link.roomIds[1] && rep.roomIds[1] === link.roomIds[0])
+                            );
                             return (
                               <LinkView
                                 deleteLink={() => {
@@ -282,6 +366,10 @@ export function BaseView(): ReactElement {
                                 linkedRoom={linkedRoom}
                                 linkIndex={linkIndex}
                                 roomIndex={r}
+                                weight={link.weight}
+                                hard={link.hard}
+                                satisfied={report?.satisfied}
+                                sharedSides={report?.sharedSides}
                                 setLinkedRoomId={(newLinkedRoomId: string) => {
                                   const linkIndexInBaseSpec = base.links.indexOf(link);
                                   // The ternaries below are to avoid swapping rooms 0 and 1 inadvertently.
@@ -290,6 +378,16 @@ export function BaseView(): ReactElement {
                                     0: link.roomIds[0] === room.id ? link.roomIds[0] : newLinkedRoomId,
                                     1: link.roomIds[1] === room.id ? link.roomIds[1] : newLinkedRoomId,
                                   });
+                                  setBaseData(base);
+                                }}
+                                setLinkWeight={(newWeight: number) => {
+                                  const linkIndexInBaseSpec = base.links.indexOf(link);
+                                  base.setLinkWeight(linkIndexInBaseSpec, newWeight);
+                                  setBaseData(base);
+                                }}
+                                setLinkHard={(newHard: boolean) => {
+                                  const linkIndexInBaseSpec = base.links.indexOf(link);
+                                  base.setLinkHard(linkIndexInBaseSpec, newHard);
                                   setBaseData(base);
                                 }}
                                 setMessage={setMessage}
@@ -329,7 +427,8 @@ export function BaseView(): ReactElement {
                     );
                   })()}
               </RoomView>
-            ))
+              );
+            })
         }
         <div
           className="labeled-element"

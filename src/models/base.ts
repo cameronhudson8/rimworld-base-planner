@@ -7,6 +7,8 @@ import {
 import {
   clone as cloneLink,
   dataSchema as linkDataSchema,
+  getWeight as getLinkWeight,
+  isHard as isLinkHard,
   LinkData,
 } from "./link";
 import {
@@ -19,11 +21,31 @@ import {
 
 export type GetEnergyOptions = {
   centerOfMassWeight?: number,
-  interRoomWeight?: number,
   intraRoomWeight?: number,
+  adjacencyWeight?: number,
+  missingAdjacencyPenalty?: number,
+  hardAdjacencyPenalty?: number,
 };
 
 export type BaseId = string;
+
+export interface LinkReport {
+  roomIds: { 0: RoomId, 1: RoomId };
+  weight: number;
+  hard: boolean;
+  sharedSides: number;
+  satisfied: boolean;
+};
+
+export interface OptimizeOptions {
+  iterations?: number;
+  restarts?: number;
+  t0?: number;
+  tFinal?: number;
+  coolingRate?: number;
+  // Optional callback fired after each restart. Called with (completed, total).
+  onProgress?: (completedRestarts: number, totalRestarts: number) => void;
+};
 
 export interface BaseData {
   cells: CellData[][];
@@ -63,6 +85,8 @@ export const dataSchema = joi.object<BaseData, true>({
         0: joi.string().allow(joi.in('.....rooms', { adjust: (roomSpec: RoomData) => roomSpec.name })),
         1: joi.string().allow(joi.in('.....rooms', { adjust: (roomSpec: RoomData) => roomSpec.name })),
       }),
+      weight: joi.number().min(0).optional(),
+      hard: joi.boolean().optional(),
     })),
   ),
   rooms: joi.array<RoomData[]>().items(
@@ -84,6 +108,7 @@ export class Base implements BaseData {
   energy: number = 0;
   errors: { [key in keyof typeof BaseError]?: string }[];
   links: LinkData[];
+  linkReports: LinkReport[] = [];
   rooms: RoomData[];
 
   // The constructor does not preserve any references that are passed in.
@@ -138,116 +163,230 @@ export class Base implements BaseData {
   private computeEnergy(
     {
       centerOfMassWeight,
-      interRoomWeight,
       intraRoomWeight,
+      adjacencyWeight,
+      missingAdjacencyPenalty,
+      hardAdjacencyPenalty,
     }: {
       centerOfMassWeight: number,
-      interRoomWeight: number,
       intraRoomWeight: number,
+      adjacencyWeight: number,
+      missingAdjacencyPenalty: number,
+      hardAdjacencyPenalty: number,
     } = {
         centerOfMassWeight: 0.5,
-        interRoomWeight: 1,
         intraRoomWeight: 2,
+        adjacencyWeight: 1,
+        // Constant added per missing soft-link adjacency (before weight). This
+        // dominates any centroid-distance term so "near but not touching" is
+        // strictly worse than "touching".
+        missingAdjacencyPenalty: 1000,
+        // Constant added per missing hard-link adjacency (before weight).
+        hardAdjacencyPenalty: 100000,
       }): Base {
 
-    function makeEmptyEnergyStats() {
-      return {
-        centerOfMassStats: {
-          count: 0,
-          energy: 0,
-        },
-        intraRoomStats: {
-          count: 0,
-          energy: 0,
-        },
-        interRoomStats: {
-          count: 0,
-          energy: 0,
-        },
-      };
+    // --- Center-of-mass + intra-room energy (compactness) -------------------
+    // For every pair of assigned cells, accumulate squared euclidean distance:
+    //   - centerOfMassStats: all pairs (keeps the base compact)
+    //   - intraRoomStats:    pairs of cells in the same room (keeps each room
+    //                        connected/compact)
+    // Inter-room (linked) cost is no longer based on centroid distance — see
+    // the adjacency term below.
+
+    let comEnergy = 0;
+    let comCount = 0;
+    let intraEnergy = 0;
+    let intraCount = 0;
+
+    for (let i1 = 0; i1 < this.cells.length; i1 += 1) {
+      const row1 = this.cells[i1];
+      for (let j1 = 0; j1 < row1.length; j1 += 1) {
+        const cell1 = row1[j1];
+        if (cell1.roomsAllowed.length === 0 || cell1.roomId === undefined) {
+          continue;
+        }
+        for (let i2 = i1; i2 < this.cells.length; i2 += 1) {
+          const row2 = this.cells[i2];
+          const jStart = i2 === i1 ? j1 + 1 : 0;
+          for (let j2 = jStart; j2 < row2.length; j2 += 1) {
+            const cell2 = row2[j2];
+            if (cell2.roomId === undefined) {
+              continue;
+            }
+            const di = i2 - i1;
+            const dj = j2 - j1;
+            const sqDist = di * di + dj * dj;
+            comEnergy += sqDist;
+            comCount += 1;
+            if (cell1.roomId === cell2.roomId) {
+              intraEnergy += sqDist;
+              intraCount += 1;
+            }
+          }
+        }
+      }
     }
 
-    const cellEnergyStats = this.cells.map((cellRow1, cell1i) => {
-      return cellRow1.map((cell1, cell1j) => {
-        if (
-          // Ignore unusable cells.
-          cell1.roomsAllowed.length === 0
-          // Ignore cells that don't have a room assigned.
-          || cell1.roomId === undefined
-        ) {
-          return [makeEmptyEnergyStats()];
+    // --- Adjacency energy (per link) ---------------------------------------
+    // For each link, count how many 4-connected cell pairs sit on the boundary
+    // between the two rooms. A link is "satisfied" when at least one such pair
+    // exists. Unsatisfied links pay a flat penalty (so 'close but no shared
+    // wall' is strictly worse than touching) PLUS the manhattan distance
+    // between the rooms' closest cells (gives the annealer a gradient toward
+    // the other room).
+
+    const cellsByRoom = new Map<RoomId, Array<{ i: number, j: number }>>();
+    for (let i = 0; i < this.cells.length; i += 1) {
+      for (let j = 0; j < this.cells[i].length; j += 1) {
+        const cell = this.cells[i][j];
+        if (cell.roomId !== undefined) {
+          let arr = cellsByRoom.get(cell.roomId);
+          if (arr === undefined) {
+            arr = [];
+            cellsByRoom.set(cell.roomId, arr);
+          }
+          arr.push({ i, j });
         }
+      }
+    }
 
-        const cell1LinkedRoomIds = this.links
-          .filter((link) => link.roomIds[0] === cell1.roomId || link.roomIds[1] === cell1.roomId)
-          .map((link) => link.roomIds[0] === cell1.roomId ? link.roomIds[1] : link.roomIds[0]);
+    const linkReports: LinkReport[] = [];
+    let adjacencyEnergy = 0;
 
-        return this.cells.map((cellRow2, cell2i) => {
-          // We only want to compute each cell<->cell energy only once (~n^2/2, not n^2).
-          // Therefore, return early depending on cell2i (and below, depending on cell2j).
-          return cellRow2.map((cell2, cell2j) => {
-            if (
-              // Ignore unusable cells.
-              cell1.roomsAllowed.length === 0
-              // Ignore cells that don't have a room assigned.
-              || cell2.roomId === undefined
-              // We only want to compute each cell<->cell energy only once (~n^2/2, not n^2).
-              // Therefore, return early depending on the coordinates of cell1 and cell2.
-              || (cell2i < cell1i) || ((cell2i === cell1i) && (cell2j <= cell1j))
-            ) {
-              return makeEmptyEnergyStats();
+    for (const link of this.links) {
+      const roomAId = link.roomIds[0];
+      const roomBId = link.roomIds[1];
+      const cellsA = cellsByRoom.get(roomAId) ?? [];
+      const cellsB = cellsByRoom.get(roomBId) ?? [];
+      const weight = getLinkWeight(link);
+      const hard = isLinkHard(link);
+
+      // Count 4-connected shared sides between roomA and roomB.
+      let sharedSides = 0;
+      if (cellsA.length > 0 && cellsB.length > 0) {
+        const setB = new Set<string>(cellsB.map((c) => `${c.i},${c.j}`));
+        for (const a of cellsA) {
+          if (setB.has(`${a.i - 1},${a.j}`)) sharedSides += 1;
+          if (setB.has(`${a.i + 1},${a.j}`)) sharedSides += 1;
+          if (setB.has(`${a.i},${a.j - 1}`)) sharedSides += 1;
+          if (setB.has(`${a.i},${a.j + 1}`)) sharedSides += 1;
+        }
+      }
+
+      // Minimum manhattan distance between any cell in A and any cell in B.
+      // Only computed when no shared sides — used as a gradient term to pull
+      // unsatisfied links together.
+      let minManhattan = 0;
+      let linkEnergy = 0;
+      if (sharedSides === 0) {
+        if (cellsA.length === 0 || cellsB.length === 0) {
+          // One of the rooms hasn't been placed yet — no spatial term to add.
+          minManhattan = 0;
+        } else {
+          minManhattan = Number.POSITIVE_INFINITY;
+          for (const a of cellsA) {
+            for (const b of cellsB) {
+              const d = Math.abs(a.i - b.i) + Math.abs(a.j - b.j);
+              if (d < minManhattan) {
+                minManhattan = d;
+              }
             }
+          }
+        }
+        const flat = hard ? hardAdjacencyPenalty : missingAdjacencyPenalty;
+        linkEnergy = weight * (flat + minManhattan * minManhattan);
+      }
+      // When sharedSides >= 1 the link is satisfied: no penalty. We deliberately
+      // don't reward extra shared sides — that would distort other constraints.
 
-            const isSameRoom = cell1.roomId === cell2.roomId;
-            const isLinkedRoom = cell1LinkedRoomIds.includes(cell2.roomId);
+      adjacencyEnergy += linkEnergy;
+      linkReports.push({
+        roomIds: { 0: roomAId, 1: roomBId },
+        weight,
+        hard,
+        sharedSides,
+        satisfied: sharedSides > 0,
+      });
+    }
 
-            const distance = Math.pow(Math.pow(cell2i - cell1i, 2) + Math.pow(cell2j - cell1j, 2), 0.5)
-            const energy = Math.pow(distance, 2);
-            return {
-              centerOfMassStats: {
-                count: 1,
-                energy: energy,
-              },
-              intraRoomStats: {
-                count: isSameRoom ? 1 : 0,
-                energy: isSameRoom ? energy : 0,
-              },
-              interRoomStats: {
-                count: isLinkedRoom ? 1 : 0,
-                energy: isLinkedRoom ? energy : 0,
-              },
-            };
+    // --- Intra-room connectivity (keep each room as one contiguous block) ----
+    // For each room: find its largest 4-connected component. Cells in the
+    // minority components are "isolated". For every isolated cell we add
+    //   (manhattan_distance_to_main_component + 1) * connectivityWeightPerCell
+    // The "+1" is a flat per-isolated-cell penalty; the manhattan distance is
+    // what gives the annealer a continuous gradient toward reabsorbing the
+    // stray cell into the main block (a step closer = strictly lower energy).
+    let connectivityPenalty = 0;
+    // 5000 means a stray cell at manhattan-distance 1 costs 10,000 — strictly
+    // more than satisfying a single soft link of weight 10. Rationale: in the
+    // actual game, colonists cannot walk between the two pieces of a
+    // "fragmented" room, so the room isn't really a room. Better to lose a
+    // soft adjacency than to ship a layout the player can't actually build.
+    const connectivityWeightPerCell = 5000;
+    for (const room of this.rooms) {
+      const roomCellsList = cellsByRoom.get(room.id) ?? [];
+      if (roomCellsList.length <= 1) continue;
 
-          });
-        }).flat();
-      }).flat();
-    }).flat();
+      const cellSet = new Set(roomCellsList.map((c) => `${c.i},${c.j}`));
+      const visited = new Set<string>();
+      // Each component as the set of its member-cell keys.
+      const components: Array<Array<{ i: number, j: number }>> = [];
+      for (const start of roomCellsList) {
+        const startKey = `${start.i},${start.j}`;
+        if (visited.has(startKey)) continue;
+        const component: Array<{ i: number, j: number }> = [];
+        const queue: Array<{ i: number, j: number }> = [start];
+        while (queue.length > 0) {
+          const cur = queue.shift()!;
+          const k = `${cur.i},${cur.j}`;
+          if (visited.has(k)) continue;
+          visited.add(k);
+          component.push(cur);
+          for (const [ni, nj] of [[cur.i - 1, cur.j], [cur.i + 1, cur.j], [cur.i, cur.j - 1], [cur.i, cur.j + 1]]) {
+            const nkey = `${ni},${nj}`;
+            if (cellSet.has(nkey) && !visited.has(nkey)) {
+              queue.push({ i: ni, j: nj });
+            }
+          }
+        }
+        components.push(component);
+      }
+      if (components.length <= 1) continue;
 
-    const cumulativeEnergyStats = cellEnergyStats.reduce((cumulativeEnergyStats, cellEnergyStats) => ({
-      centerOfMassStats: {
-        count: cumulativeEnergyStats.centerOfMassStats.count + cellEnergyStats.centerOfMassStats.count,
-        energy: cumulativeEnergyStats.centerOfMassStats.energy + cellEnergyStats.centerOfMassStats.energy,
-      },
-      intraRoomStats: {
-        count: cumulativeEnergyStats.intraRoomStats.count + cellEnergyStats.intraRoomStats.count,
-        energy: cumulativeEnergyStats.intraRoomStats.energy + cellEnergyStats.intraRoomStats.energy,
-      },
-      interRoomStats: {
-        count: cumulativeEnergyStats.interRoomStats.count + cellEnergyStats.interRoomStats.count,
-        energy: cumulativeEnergyStats.interRoomStats.energy + cellEnergyStats.interRoomStats.energy,
-      },
-    }),
-      makeEmptyEnergyStats(),
-    );
+      // Largest component (by cell count) wins ties by being the first found.
+      let mainIdx = 0;
+      for (let k = 1; k < components.length; k += 1) {
+        if (components[k].length > components[mainIdx].length) {
+          mainIdx = k;
+        }
+      }
+      const mainComponent = components[mainIdx];
 
-    const { centerOfMassStats, intraRoomStats, interRoomStats } = cumulativeEnergyStats;
-    // We divide the energies by the counts in order to normalize the energies with respect to each other.
+      for (let k = 0; k < components.length; k += 1) {
+        if (k === mainIdx) continue;
+        for (const stray of components[k]) {
+          let minDist = Number.POSITIVE_INFINITY;
+          for (const target of mainComponent) {
+            const d = Math.abs(stray.i - target.i) + Math.abs(stray.j - target.j);
+            if (d < minDist) minDist = d;
+          }
+          connectivityPenalty += (minDist + 1) * connectivityWeightPerCell;
+        }
+      }
+    }
+
+    // Combine. Center-of-mass and intra-room use the original mean^power form
+    // (they're well-behaved, low-magnitude terms). Adjacency is added linearly
+    // — its constants are already large enough to dominate when violated.
+    // Connectivity penalty is also linear.
     const energy =
-      (centerOfMassStats.count === 0 ? 0 : Math.pow(centerOfMassStats.energy / centerOfMassStats.count, centerOfMassWeight))
-      + (intraRoomStats.count === 0 ? 0 : Math.pow(intraRoomStats.energy / intraRoomStats.count, intraRoomWeight))
-      + (interRoomStats.count === 0 ? 0 : Math.pow(interRoomStats.energy / interRoomStats.count, interRoomWeight));
+      (comCount === 0 ? 0 : Math.pow(comEnergy / comCount, centerOfMassWeight))
+      + (intraCount === 0 ? 0 : Math.pow(intraEnergy / intraCount, intraRoomWeight))
+      + adjacencyWeight * adjacencyEnergy
+      + connectivityPenalty;
 
     this.energy = energy;
+    this.linkReports = linkReports;
     return this;
   }
 
@@ -281,105 +420,430 @@ export class Base implements BaseData {
     return this;
   }
 
-  optimize({ iterations } = { iterations: Math.pow(2, 12) }): Base {
-
-    let nextBase = new Base(this);
-
-    for (let iteration = 0; iteration < iterations; iteration += 1) {
-
-      const candidateBase = new Base(nextBase);
-
-      // Create a list of cells, including their coordinates, to facilitate
-      // swapping later.
-      // Each cells must allow at least 1 room, and we can exclude any cells
-      // that allow a room that no other cell allows.
-      const cellsWithCoordinates = candidateBase.cells
-        .map((cellRow, i) => cellRow.map((cell, j) => ({
-          cell,
-          coordinates: {
-            0: i,
-            1: j,
-          },
-        })))
-        .flat();
-      const usableCells = cellsWithCoordinates.filter(({ cell }) => cell.roomsAllowed.length > 0);
-      const swappableCells = usableCells
-        .filter(({ cell }) => {
-          if (cell.roomsAllowed.length > 1) {
-            return true;
-          }
-          const allowedRoomId = cell.roomsAllowed[0].id;
-          const numberOftherCellsThatAllowThisRoom = usableCells
-            .filter(({ cell: c }) => c !== cell && c.roomsAllowed[0].id !== allowedRoomId)
-            .length;
-          if (numberOftherCellsThatAllowThisRoom === 0) {
-            return false;
-          }
-          return true;
+  // Cells whose roomId may flip during optimization, with their roomsAllowed
+  // pre-indexed for fast swap legality checks.
+  private _buildSwappableRefs(): Array<{ i: number, j: number, allowedRoomIds: Set<RoomId> }> {
+    const refs: Array<{ i: number, j: number, allowedRoomIds: Set<RoomId> }> = [];
+    for (let i = 0; i < this.cells.length; i += 1) {
+      for (let j = 0; j < this.cells[i].length; j += 1) {
+        const cell = this.cells[i][j];
+        if (cell.roomsAllowed.length === 0) continue;
+        if (cell.roomsAllowed.length === 1) continue;
+        refs.push({
+          i,
+          j,
+          allowedRoomIds: new Set(cell.roomsAllowed.map((r) => r.id)),
         });
+      }
+    }
+    return refs;
+  }
 
-      // Randomly select 2 cells, without replacement.
-      // The two cells must allow the IDs of rooms that each other is currently
-      // using (if any), and the two cells must not already have the same
-      // room ID.
-      const [cell1WithCoordinates] = swappableCells.splice(Math.floor(Math.random() * swappableCells.length), 1);
-      const swappableCells2 = swappableCells
-        .filter((cell2WithCoordinates) => cell2WithCoordinates.cell.roomId !== cell1WithCoordinates.cell.roomId)
-        .filter((cell2WithCoordinates) => {
-          const cell1RoomId = cell1WithCoordinates.cell.roomId;
-          const cell2RoomId = cell2WithCoordinates.cell.roomId;
-          if (
-            cell1RoomId !== undefined
-            && !cell2WithCoordinates.cell.roomsAllowed.some((room) => room.id === cell1RoomId)
-          ) {
-            return false;
-          }
-          if (
-            cell2RoomId !== undefined
-            && !cell1WithCoordinates.cell.roomsAllowed.some((room) => room.id === cell2RoomId)
-          ) {
-            return false;
-          }
-          return true;
-        });
+  // Deterministic local-minimum polish: try every pair of swappable cells and
+  // accept any swap that strictly lowers energy. Repeat until a full pass
+  // finds no improvement. This closes the "obvious local minima" the
+  // randomized annealer often leaves on the table (e.g. a fragmented room
+  // whose stray cell could absorb back with a single swap that the annealer
+  // never sampled, or a soft link that could be satisfied for free).
+  //
+  // Cost: each pass is O(swappable² × energyEvalCost). For ~80 swappable cells
+  // and 9×9 grid that's a few seconds at most. The pass count is bounded by
+  // MAX_PASSES as a safety, though in practice it converges in 2-4 passes.
+  greedyImprove(): { passes: number, swaps: number, threeCycles: number, deltaEnergy: number } {
+    const MAX_PASSES = 12;
+    const swappable = this._buildSwappableRefs();
+    if (swappable.length < 2) return { passes: 0, swaps: 0, threeCycles: 0, deltaEnergy: 0 };
 
-      if (swappableCells2.length === 0) {
-        // There are no other cells that allow cell1's room ID, so this iteration ends.
+    const startEnergy = this.energy;
+    let totalSwaps = 0;
+    let totalThreeCycles = 0;
+    let passes = 0;
+
+    // --- Pass A: 2-swap until convergence -----------------------------------
+    let improved = true;
+    while (improved && passes < MAX_PASSES) {
+      improved = false;
+      passes += 1;
+      for (let i = 0; i < swappable.length; i += 1) {
+        for (let j = i + 1; j < swappable.length; j += 1) {
+          const a = swappable[i];
+          const b = swappable[j];
+          const cellA = this.cells[a.i][a.j];
+          const cellB = this.cells[b.i][b.j];
+          const aRoomId = cellA.roomId;
+          const bRoomId = cellB.roomId;
+          if (aRoomId === bRoomId) continue;
+          if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) continue;
+          if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) continue;
+
+          const energyBefore = this.energy;
+          cellA.roomId = bRoomId;
+          cellB.roomId = aRoomId;
+          this.reconcile();
+          if (this.energy < energyBefore) {
+            improved = true;
+            totalSwaps += 1;
+          } else {
+            cellA.roomId = aRoomId;
+            cellB.roomId = bRoomId;
+            this.reconcile();
+          }
+        }
+      }
+    }
+
+    // --- Pass B: 3-cycle moves to escape pairwise local minima --------------
+    // For each triple of swappable cells with three distinct rooms, try both
+    // cyclic rotations (the only non-swap permutations of 3 items). A 3-cycle
+    // can free up fragmented rooms whose unfragmentation would require
+    // breaking a hard link if done with a single 2-swap.
+    //
+    // Naive O(N³) would mean ~165k triples × reconcile (~10ms) = minutes.
+    // We restrict to triples whose 3 cells fit inside a manhattan-diameter
+    // window — useful 3-cycles for fragmentation and adjacency are always
+    // geographically local. Diameter 4 ≈ a 5x5 spatial window, big enough to
+    // hop a single cell across a hard-link wall.
+    const TRIPLE_MAX_DIAMETER = 4;
+    const manh = (p: { i: number, j: number }, q: { i: number, j: number }) =>
+      Math.abs(p.i - q.i) + Math.abs(p.j - q.j);
+
+    let outerImproved = true;
+    let outerPasses = 0;
+    while (outerImproved && outerPasses < 4) {
+      outerImproved = false;
+      outerPasses += 1;
+      for (let i = 0; i < swappable.length; i += 1) {
+        for (let j = i + 1; j < swappable.length; j += 1) {
+          if (manh(swappable[i], swappable[j]) > TRIPLE_MAX_DIAMETER) continue;
+          for (let k = j + 1; k < swappable.length; k += 1) {
+            if (manh(swappable[i], swappable[k]) > TRIPLE_MAX_DIAMETER) continue;
+            if (manh(swappable[j], swappable[k]) > TRIPLE_MAX_DIAMETER) continue;
+            const a = swappable[i];
+            const b = swappable[j];
+            const c = swappable[k];
+            const cellA = this.cells[a.i][a.j];
+            const cellB = this.cells[b.i][b.j];
+            const cellC = this.cells[c.i][c.j];
+            const rA = cellA.roomId;
+            const rB = cellB.roomId;
+            const rC = cellC.roomId;
+            // Require three distinct rooms (otherwise a 3-cycle reduces to a 2-swap).
+            if (rA === rB || rB === rC || rA === rC) continue;
+
+            const energyBefore = this.energy;
+
+            // Cycle 1: A←rC, B←rA, C←rB
+            if ((rC === undefined || a.allowedRoomIds.has(rC))
+              && (rA === undefined || b.allowedRoomIds.has(rA))
+              && (rB === undefined || c.allowedRoomIds.has(rB))) {
+              cellA.roomId = rC;
+              cellB.roomId = rA;
+              cellC.roomId = rB;
+              this.reconcile();
+              if (this.energy < energyBefore) {
+                totalThreeCycles += 1;
+                outerImproved = true;
+                continue;
+              }
+              cellA.roomId = rA;
+              cellB.roomId = rB;
+              cellC.roomId = rC;
+              this.reconcile();
+            }
+
+            // Cycle 2: A←rB, B←rC, C←rA
+            if ((rB === undefined || a.allowedRoomIds.has(rB))
+              && (rC === undefined || b.allowedRoomIds.has(rC))
+              && (rA === undefined || c.allowedRoomIds.has(rA))) {
+              cellA.roomId = rB;
+              cellB.roomId = rC;
+              cellC.roomId = rA;
+              this.reconcile();
+              if (this.energy < energyBefore) {
+                totalThreeCycles += 1;
+                outerImproved = true;
+                continue;
+              }
+              cellA.roomId = rA;
+              cellB.roomId = rB;
+              cellC.roomId = rC;
+              this.reconcile();
+            }
+          }
+        }
+      }
+
+      // After each successful 3-cycle pass, run 2-swap to convergence again.
+      if (outerImproved) {
+        let innerImproved = true;
+        while (innerImproved && passes < MAX_PASSES) {
+          innerImproved = false;
+          passes += 1;
+          for (let i = 0; i < swappable.length; i += 1) {
+            for (let j = i + 1; j < swappable.length; j += 1) {
+              const a = swappable[i];
+              const b = swappable[j];
+              const cellA = this.cells[a.i][a.j];
+              const cellB = this.cells[b.i][b.j];
+              const aRoomId = cellA.roomId;
+              const bRoomId = cellB.roomId;
+              if (aRoomId === bRoomId) continue;
+              if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) continue;
+              if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) continue;
+              const energyBefore = this.energy;
+              cellA.roomId = bRoomId;
+              cellB.roomId = aRoomId;
+              this.reconcile();
+              if (this.energy < energyBefore) {
+                innerImproved = true;
+                totalSwaps += 1;
+              } else {
+                cellA.roomId = aRoomId;
+                cellB.roomId = bRoomId;
+                this.reconcile();
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return { passes, swaps: totalSwaps, threeCycles: totalThreeCycles, deltaEnergy: this.energy - startEnergy };
+  }
+
+  // Re-randomize a fraction p of swappable cells: pick a random allowed room
+  // (different from current) for each chosen cell. Used between restarts to
+  // perturb a good solution and explore nearby basins.
+  private _perturb(p: number): void {
+    const swappable = this._buildSwappableRefs();
+    for (const ref of swappable) {
+      if (Math.random() >= p) continue;
+      const cell = this.cells[ref.i][ref.j];
+      const options = cell.roomsAllowed.filter((r) => r.id !== cell.roomId);
+      if (options.length === 0) continue;
+      cell.roomId = options[(Math.random() * options.length) | 0].id;
+    }
+    this.reconcile();
+  }
+
+  // Runs a single annealing trajectory from the current state of `seed` (a
+  // fresh copy is made internally) and returns the lowest-energy snapshot
+  // found. Shared by sync `optimize` and async `optimizeAsync` so their
+  // per-restart behavior is identical.
+  private _runOneRestart(iterations: number, t0: number, coolingRate: number, seed: Base = this): { best: Base, bestEnergy: number } {
+    const current = new Base(seed);
+    let currentEnergy = current.energy;
+    let bestThisRun = new Base(current);
+    let bestEnergyThisRun = currentEnergy;
+    const swappable = current._buildSwappableRefs();
+
+    if (swappable.length < 2) {
+      return { best: bestThisRun, bestEnergy: bestEnergyThisRun };
+    }
+
+    let temperature = t0;
+    for (let iter = 0; iter < iterations; iter += 1) {
+      const a = swappable[(Math.random() * swappable.length) | 0];
+      const b = swappable[(Math.random() * swappable.length) | 0];
+      if (a === b) {
+        temperature *= coolingRate;
         continue;
       }
-      const [cell2WithCoordinates] = swappableCells2.splice(Math.floor(Math.random() * swappableCells2.length), 1);
-      const {
-        coordinates: {
-          0: cell1i,
-          1: cell1j,
-        },
-      } = cell1WithCoordinates;
-      const {
-        coordinates: {
-          0: cell2i,
-          1: cell2j,
-        },
-      } = cell2WithCoordinates;
+      const cellA = current.cells[a.i][a.j];
+      const cellB = current.cells[b.i][b.j];
+      const aRoomId = cellA.roomId;
+      const bRoomId = cellB.roomId;
+      if (aRoomId === bRoomId) {
+        temperature *= coolingRate;
+        continue;
+      }
+      if (aRoomId !== undefined && !b.allowedRoomIds.has(aRoomId)) {
+        temperature *= coolingRate;
+        continue;
+      }
+      if (bRoomId !== undefined && !a.allowedRoomIds.has(bRoomId)) {
+        temperature *= coolingRate;
+        continue;
+      }
 
-      const cell1RoomId = candidateBase.cells[cell1i][cell1j].roomId;
-      const cell2RoomId = candidateBase.cells[cell2i][cell2j].roomId;
-      candidateBase.cells[cell1i][cell1j].roomId = cell2RoomId;
-      candidateBase.cells[cell2i][cell2j].roomId = cell1RoomId;
+      cellA.roomId = bRoomId;
+      cellB.roomId = aRoomId;
+      current.reconcile();
+      const newEnergy = current.energy;
 
-      candidateBase.reconcile();
+      const dE = newEnergy - currentEnergy;
+      const accept = dE <= 0 || Math.random() < Math.exp(-dE / Math.max(temperature, 1e-12));
+      if (accept) {
+        currentEnergy = newEnergy;
+        if (newEnergy < bestEnergyThisRun) {
+          bestEnergyThisRun = newEnergy;
+          bestThisRun = new Base(current);
+        }
+      } else {
+        cellA.roomId = aRoomId;
+        cellB.roomId = bRoomId;
+        current.reconcile();
+      }
 
-      const threshold = nextBase.energy * (1 + Math.pow((iterations - iteration) / iterations, Math.E));
-      if (candidateBase.energy < threshold) {
-        nextBase = candidateBase;
+      temperature *= coolingRate;
+    }
+
+    return { best: bestThisRun, bestEnergy: bestEnergyThisRun };
+  }
+
+  private _commitGlobalBest(globalBest: Base, globalBestEnergy: number): void {
+    if (globalBestEnergy < this.energy) {
+      globalBest.cells.forEach((cellRow, i) => cellRow.forEach((cell, j) => {
+        this.cells[i][j].roomId = cell.roomId;
+      }));
+      this.reconcile();
+    }
+  }
+
+  private _resolveOptimizeParams(options: OptimizeOptions): { iterations: number, restarts: number, t0: number, coolingRate: number } {
+    const iterations = options.iterations ?? 50000;
+    const restarts = options.restarts ?? 10;
+    const t0 = options.t0 ?? 1.0;
+    const tFinal = options.tFinal ?? 1e-4;
+    // Geometric cooling: T(k) = t0 * coolingRate^k, choose coolingRate so we
+    // land on tFinal at the last iteration.
+    const coolingRate = options.coolingRate
+      ?? Math.pow(tFinal / t0, 1 / Math.max(1, iterations - 1));
+    return { iterations, restarts, t0, coolingRate };
+  }
+
+  optimize(options: OptimizeOptions = {}): Base {
+    const { iterations, restarts, t0, coolingRate } = this._resolveOptimizeParams(options);
+
+    let globalBest: Base = new Base(this);
+    let globalBestEnergy = globalBest.energy;
+
+    // Restart strategy:
+    //  - restart 0: raw initial state (explore the assignment basin).
+    //  - subsequent restarts: perturbative from global best (refine).
+    //  - if 2 consecutive restarts find no improvement, force a raw restart
+    //    so we escape the basin of the current global best entirely.
+    let perturbationP = 0.15;
+    let consecutiveStale = 0;
+    for (let restart = 0; restart < restarts; restart += 1) {
+      let seed: Base;
+      if (restart === 0 || consecutiveStale >= 2) {
+        seed = this;
+        consecutiveStale = 0;
+      } else {
+        seed = new Base(globalBest);
+        seed._perturb(perturbationP);
+      }
+      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate, seed);
+      if (bestEnergy < globalBestEnergy) {
+        globalBest = best;
+        globalBestEnergy = bestEnergy;
+        perturbationP = 0.15;
+        consecutiveStale = 0;
+      } else {
+        consecutiveStale += 1;
+        perturbationP = Math.min(0.5, 0.15 + 0.1 * consecutiveStale);
+      }
+      if (options.onProgress) {
+        options.onProgress(restart + 1, restarts);
       }
     }
 
-    if (nextBase.energy < this.energy) {
-      nextBase.cells.forEach((cellRow, i) => cellRow.forEach((cell, j) => {
-        this.cells[i][j].roomId = cell.roomId;
-      }));
-      this.energy = nextBase.energy;
+    // Polish the best-of-restarts with deterministic local search.
+    globalBest.greedyImprove();
+    globalBestEnergy = globalBest.energy;
+
+    this._commitGlobalBest(globalBest, globalBestEnergy);
+    return this;
+  }
+
+  // Same algorithm as `optimize`, but yields to the event loop between
+  // restarts so a UI can repaint progress and stay responsive. Use this from
+  // the browser; tests can keep using sync `optimize`.
+  async optimizeAsync(options: OptimizeOptions = {}): Promise<Base> {
+    const { iterations, restarts, t0, coolingRate } = this._resolveOptimizeParams(options);
+    const t0wallStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+    let globalBest: Base = new Base(this);
+    let globalBestEnergy = globalBest.energy;
+
+    /* eslint-disable no-console */
+    console.log(`[optimize] start: ${iterations} iter × ${restarts} restarts, T0=${t0}, cooling=${coolingRate.toFixed(6)}; initial energy=${Math.round(globalBestEnergy).toLocaleString("en-US")}`);
+
+    let perturbationP = 0.15;
+    let consecutiveStale = 0;
+    for (let restart = 0; restart < restarts; restart += 1) {
+      const tStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
+      let seed: Base;
+      let seedNote = "raw";
+      if (restart === 0 || consecutiveStale >= 2) {
+        seed = this;
+        if (consecutiveStale >= 2) seedNote = "raw (escape)";
+        consecutiveStale = 0;
+      } else {
+        seed = new Base(globalBest);
+        seed._perturb(perturbationP);
+        seedNote = `from-best p=${perturbationP.toFixed(2)}`;
+      }
+      const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate, seed);
+      const tEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
+      const improved = bestEnergy < globalBestEnergy;
+      if (improved) {
+        globalBest = best;
+        globalBestEnergy = bestEnergy;
+        perturbationP = 0.15;
+        consecutiveStale = 0;
+      } else {
+        consecutiveStale += 1;
+        perturbationP = Math.min(0.5, 0.15 + 0.1 * consecutiveStale);
+      }
+      console.log(
+        `[optimize] restart ${restart + 1}/${restarts} (${seedNote}): this=${Math.round(bestEnergy).toLocaleString("en-US")} `
+        + `global=${Math.round(globalBestEnergy).toLocaleString("en-US")}${improved ? " ↓" : ""} `
+        + `(${((tEnd - tStart) / 1000).toFixed(1)}s)`
+      );
+      if (options.onProgress) {
+        options.onProgress(restart + 1, restarts);
+      }
+      // Yield to the event loop so React can repaint the progress message.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
+
+    // Deterministic polish: try every swap pair and accept any improvement.
+    // Cleans up obvious local minima the annealer left behind.
+    const greedyStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const greedyResult = globalBest.greedyImprove();
+    const greedyEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    if (greedyResult.swaps > 0 || greedyResult.threeCycles > 0) {
+      console.log(
+        `[optimize] greedy polish: ${greedyResult.swaps} swap(s) + ${greedyResult.threeCycles} 3-cycle(s) in ${greedyResult.passes} pass(es), `
+        + `energy ${Math.round(globalBestEnergy).toLocaleString("en-US")} → ${Math.round(globalBest.energy).toLocaleString("en-US")} `
+        + `(${((greedyEnd - greedyStart) / 1000).toFixed(1)}s)`
+      );
+      globalBestEnergy = globalBest.energy;
+    } else {
+      console.log(`[optimize] greedy polish: no improvement (${greedyResult.passes} pass(es), ${((greedyEnd - greedyStart) / 1000).toFixed(1)}s)`);
+    }
+
+    this._commitGlobalBest(globalBest, globalBestEnergy);
+
+    // Final summary including link breakdown.
+    const t0wallEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const unsat = this.linkReports.filter((r) => !r.satisfied);
+    const unsatHard = unsat.filter((r) => r.hard);
+    console.log(
+      `[optimize] done in ${((t0wallEnd - t0wallStart) / 1000).toFixed(1)}s: energy=${Math.round(this.energy).toLocaleString("en-US")}, `
+      + `links ${this.linkReports.length - unsat.length}/${this.linkReports.length} satisfied `
+      + `(${unsatHard.length} hard unsatisfied)`
+    );
+    if (unsat.length > 0) {
+      const byName = (id: string) => this.rooms.find((r) => r.id === id)?.name ?? id;
+      console.log("[optimize] unsatisfied links:");
+      for (const r of unsat) {
+        console.log(`  ${r.hard ? "[HARD]" : "      "} ${byName(r.roomIds[0])} ↔ ${byName(r.roomIds[1])}  (weight ${r.weight})`);
+      }
+    }
+    /* eslint-enable no-console */
 
     return this;
   }
@@ -424,6 +888,27 @@ export class Base implements BaseData {
       throw new Error(`Attempted to set the roomIds of the link at index '${index}', but the current maximum index of the links is '${this.links.length - 1}'.`)
     }
     this.links[index].roomIds = roomIds;
+    this.reconcile();
+    return this;
+  }
+
+  setLinkWeight(index: number, weight: number): Base {
+    if (index > this.links.length - 1) {
+      throw new Error(`Attempted to set the weight of the link at index '${index}', but the current maximum index of the links is '${this.links.length - 1}'.`);
+    }
+    if (!Number.isFinite(weight) || weight < 0) {
+      throw new Error(`Link weight must be a non-negative finite number; got '${weight}'.`);
+    }
+    this.links[index].weight = weight;
+    this.reconcile();
+    return this;
+  }
+
+  setLinkHard(index: number, hard: boolean): Base {
+    if (index > this.links.length - 1) {
+      throw new Error(`Attempted to set the hard flag of the link at index '${index}', but the current maximum index of the links is '${this.links.length - 1}'.`);
+    }
+    this.links[index].hard = hard;
     this.reconcile();
     return this;
   }
