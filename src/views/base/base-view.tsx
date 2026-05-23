@@ -220,14 +220,11 @@ export function BaseView(): ReactElement {
         Cargar preset: Late-game vainilla
       </button>
       <p>Current energy: {
-        base.energy.toLocaleString(
-          undefined,
-          {
-            minimumSignificantDigits: 4,
-            maximumSignificantDigits: 4,
-          }
-        )
-      }</p>
+        // Force en-US grouping so a high energy (e.g. 17,010) is never
+        // mistaken for a low one (17.010 in locales using comma as decimal).
+        // Round to integer: at this scale the fractional part isn't meaningful.
+        Math.round(base.energy).toLocaleString("en-US")
+      } <small style={{ color: "#888" }}>(lower is better; ~1000+ usually means an unsatisfied link)</small></p>
       {base.linkReports.length > 0 && (() => {
         const roomName = (id: string) => base.rooms.find((rm) => rm.id === id)?.name ?? id;
         const unsatisfied = base.linkReports.filter((rep) => !rep.satisfied);

@@ -507,8 +507,8 @@ export class Base implements BaseData {
   }
 
   private _resolveOptimizeParams(options: OptimizeOptions): { iterations: number, restarts: number, t0: number, coolingRate: number } {
-    const iterations = options.iterations ?? 30000;
-    const restarts = options.restarts ?? 4;
+    const iterations = options.iterations ?? 50000;
+    const restarts = options.restarts ?? 6;
     const t0 = options.t0 ?? 1.0;
     const tFinal = options.tFinal ?? 1e-4;
     // Geometric cooling: T(k) = t0 * coolingRate^k, choose coolingRate so we
@@ -544,16 +544,28 @@ export class Base implements BaseData {
   // the browser; tests can keep using sync `optimize`.
   async optimizeAsync(options: OptimizeOptions = {}): Promise<Base> {
     const { iterations, restarts, t0, coolingRate } = this._resolveOptimizeParams(options);
+    const t0wallStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
 
     let globalBest: Base = new Base(this);
     let globalBestEnergy = globalBest.energy;
 
+    /* eslint-disable no-console */
+    console.log(`[optimize] start: ${iterations} iter × ${restarts} restarts, T0=${t0}, cooling=${coolingRate.toFixed(6)}; initial energy=${Math.round(globalBestEnergy).toLocaleString("en-US")}`);
+
     for (let restart = 0; restart < restarts; restart += 1) {
+      const tStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
       const { best, bestEnergy } = this._runOneRestart(iterations, t0, coolingRate);
-      if (bestEnergy < globalBestEnergy) {
+      const tEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
+      const improved = bestEnergy < globalBestEnergy;
+      if (improved) {
         globalBest = best;
         globalBestEnergy = bestEnergy;
       }
+      console.log(
+        `[optimize] restart ${restart + 1}/${restarts}: this=${Math.round(bestEnergy).toLocaleString("en-US")} `
+        + `global=${Math.round(globalBestEnergy).toLocaleString("en-US")}${improved ? " ↓" : ""} `
+        + `(${((tEnd - tStart) / 1000).toFixed(1)}s)`
+      );
       if (options.onProgress) {
         options.onProgress(restart + 1, restarts);
       }
@@ -562,6 +574,25 @@ export class Base implements BaseData {
     }
 
     this._commitGlobalBest(globalBest, globalBestEnergy);
+
+    // Final summary including link breakdown.
+    const t0wallEnd = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const unsat = this.linkReports.filter((r) => !r.satisfied);
+    const unsatHard = unsat.filter((r) => r.hard);
+    console.log(
+      `[optimize] done in ${((t0wallEnd - t0wallStart) / 1000).toFixed(1)}s: energy=${Math.round(this.energy).toLocaleString("en-US")}, `
+      + `links ${this.linkReports.length - unsat.length}/${this.linkReports.length} satisfied `
+      + `(${unsatHard.length} hard unsatisfied)`
+    );
+    if (unsat.length > 0) {
+      const byName = (id: string) => this.rooms.find((r) => r.id === id)?.name ?? id;
+      console.log("[optimize] unsatisfied links:");
+      for (const r of unsat) {
+        console.log(`  ${r.hard ? "[HARD]" : "      "} ${byName(r.roomIds[0])} ↔ ${byName(r.roomIds[1])}  (weight ${r.weight})`);
+      }
+    }
+    /* eslint-enable no-console */
+
     return this;
   }
 
